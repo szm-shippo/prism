@@ -2,6 +2,8 @@
 
 Obsidian Vault の Markdown を知識の正本として扱うプラグインです。現在はプラグインの最小プロジェクト構成のみを実装しています。機能と実装順序は [`spec/implementation-order.md`](spec/implementation-order.md) を参照してください。
 
+コードの責務と依存方向は [モジュール境界](docs/architecture.md) に記載しています。
+
 ## 開発
 
 Node.js と npm を用意して、次を実行します。
