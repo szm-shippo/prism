@@ -139,3 +139,18 @@ test('source registry records survive restart alongside settings', async () => {
   await restarted.plugin.setShowVaultNotice(true);
   assert.equal(restarted.writes[0].sourceRegistry[0].source_id, record.source_id);
 });
+
+test('chunk registry persists alongside sources and settings', async () => {
+  const first = await loadPlugin({ showVaultNotice: false });
+  const source = await first.plugin.sourceRegistry.create({
+    path: 'one.md', content: '# One', mtime: 1, size: 5,
+  });
+  const chunk = {
+    chunk_id: 'chunk-1', source_id: source.source_id, content: '# One',
+    content_hash: 'hash-1', location: { startLine: 1, endLine: 1 },
+  };
+  await first.plugin.chunkRegistry.put([chunk]);
+  const restarted = await loadPlugin(first.writes.at(-1));
+  assert.equal(restarted.plugin.settings.showVaultNotice, false);
+  assert.deepEqual(structuredClone(restarted.plugin.chunkRegistry.get('chunk-1')), chunk);
+});

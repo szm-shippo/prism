@@ -26,6 +26,8 @@ Markdown のファイル名変更・移動はパスだけを更新し、source I
 
 Markdown の削除イベントでは対応する Registry レコードを除き、削除した source ID を返す。フォルダ削除では配下の source ID をまとめて返す。Chunk や検索インデックスの削除は後続のパイプラインで行う。
 
+`src/core/index/chunk-registry.ts` は Chunker の出力を ID と source ID で保持する。登録時に Source Registry の source ID を確認し、source ごとの列挙と一括削除を提供する。レコードはプラグイン保存データ内に置き、Vault Markdown から再生成できる派生データとして扱う。Source の削除と Chunk の削除を連動させる処理は後続 Issue の範囲とする。
+
 ## Markdown Chunker
 
 `src/core/index/markdown-chunker.ts` は見出し行（コードフェンス外）を境界にして、見出しと本文をひとつの Chunk にする。各 Chunk の `location` は元 Markdown の1始まりの行番号で、`content_hash` は内容から、`chunk_id` は source ID・開始行・内容から決定的に算出する。再実行時に同じ入力から同じ ID を得られるようにするためであり、これらは Vault Markdown から再生成できる派生値である。現在の分割は見出し単位で、長さによる再分割は行わない。
