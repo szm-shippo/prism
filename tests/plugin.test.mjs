@@ -81,6 +81,7 @@ async function loadPlugin(savedData, failSave = false, storedSecrets = new Map()
     addButton(callback) {
       const button = {
         setButtonText(value) { this.label = value; return this; },
+        setDisabled(value) { this.disabled = value; return this; },
         onClick(handler) { this.click = handler; return this; },
       };
       callback(button);
@@ -174,6 +175,44 @@ test('failed rebuild leaves Markdown intact and can be retried without remote co
   assert.equal((await plugin.fullTextSearch.search('Old', 5)).length, 0);
   assert.equal(plugin.vectorStore, undefined);
   assert.equal(requests.length, 0);
+});
+
+test('Advanced settings shows index counts and rebuilds from Vault Markdown', async () => {
+  const { plugin, tabs, MockTFile, notices } = await loadPlugin(null);
+  const file = new MockTFile('note.md', '# Vault note');
+  plugin.app.vault.files = [file];
+  tabs[0].display();
+  const children = tabs[0].containerEl.children;
+  const advanced = children.findIndex((child) => child.tag === 'h3' && child.text === 'Advanced');
+  const status = children.findIndex((child) => child.name === 'Index status');
+  assert.ok(status > advanced);
+  assert.match(children[status].description, /ready\. 0 sources, 0 chunks/);
+  const rebuild = children.find((child) => child.name === 'Rebuild index');
+  assert.match(rebuild.description, /sends Markdown chunks to OpenAI/);
+  assert.equal(rebuild.button.disabled, false);
+  await rebuild.button.click();
+  assert.deepEqual(structuredClone(plugin.getIndexStatus()), { state: 'ready', sources: 1, chunks: 1 });
+  assert.match(notices.at(-1), /rebuilt from Vault Markdown/);
+  const updated = tabs[0].containerEl.children.find((child) => child.name === 'Index status');
+  assert.match(updated.description, /ready\. 1 sources, 1 chunks/);
+  assert.equal(file.content, '# Vault note');
+});
+
+test('Advanced rebuild reports failure and allows a retry', async () => {
+  const { plugin, tabs, MockTFile, notices } = await loadPlugin(null);
+  const file = new MockTFile('note.md', '# Vault note');
+  plugin.app.vault.files = [file];
+  const read = plugin.app.vault.read;
+  plugin.app.vault.read = async () => { throw new Error('Vault read failed'); };
+  tabs[0].display();
+  await tabs[0].containerEl.children.find((child) => child.name === 'Rebuild index').button.click();
+  assert.equal(plugin.getIndexStatus().state, 'failed');
+  assert.match(notices.at(-1), /could not rebuild/);
+  assert.equal(file.content, '# Vault note');
+  plugin.app.vault.read = read;
+  await tabs[0].containerEl.children.find((child) => child.name === 'Rebuild index').button.click();
+  assert.equal(plugin.getIndexStatus().state, 'ready');
+  assert.equal(plugin.getIndexStatus().sources, 1);
 });
 
 test('remote indexing sends only changed chunks after explicit opt-in and stops after opt-out', async () => {

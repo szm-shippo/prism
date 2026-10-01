@@ -18,6 +18,8 @@ export default class PrismPlugin extends Plugin {
   private sourceEvents?: SourceEventHandler;
   private savedData: Record<string, unknown> = {};
   private dataWrite: Promise<void> = Promise.resolve();
+  private rebuildState: 'ready' | 'rebuilding' | 'failed' = 'ready';
+  private rebuildPromise?: Promise<void>;
 
   async onload(): Promise<void> {
     const loaded = await this.loadData();
@@ -126,9 +128,27 @@ export default class PrismPlugin extends Plugin {
     this.addSettingTab(new PrismSettingTab(this));
   }
 
-  async rebuildIndex(): Promise<void> {
-    if (!this.sourceEvents) throw new Error('Prism indexes are not ready.');
-    await this.sourceEvents.rebuild();
+  getIndexStatus(): { state: 'ready' | 'rebuilding' | 'failed'; sources: number; chunks: number } {
+    const sourceIds = this.sourceRegistry?.list().map((source) => source.source_id) ?? [];
+    return {
+      state: this.rebuildState,
+      sources: sourceIds.length,
+      chunks: sourceIds.reduce((count, id) => count + (this.chunkRegistry?.listBySource(id).length ?? 0), 0),
+    };
+  }
+
+  rebuildIndex(): Promise<void> {
+    if (!this.sourceEvents) return Promise.reject(new Error('Prism indexes are not ready.'));
+    if (this.rebuildPromise) return this.rebuildPromise;
+    this.rebuildState = 'rebuilding';
+    const rebuild = this.sourceEvents.rebuild().then(() => {
+      this.rebuildState = 'ready';
+    }, (error: unknown) => {
+      this.rebuildState = 'failed';
+      throw error;
+    });
+    this.rebuildPromise = rebuild.finally(() => { this.rebuildPromise = undefined; });
+    return this.rebuildPromise;
   }
 
   async setShowVaultNotice(value: boolean): Promise<void> {
@@ -263,6 +283,29 @@ class PrismSettingTab extends PluginSettingTab {
       (value) => this.prism.setEmbeddingApiKey(value));
     this.addApiKeySetting('LLM API key', this.prism.hasLlmApiKey(),
       (value) => this.prism.setLlmApiKey(value));
+
+    containerEl.createEl('h3', { text: 'Advanced' });
+    const status = this.prism.getIndexStatus();
+    new Setting(containerEl)
+      .setName('Index status')
+      .setDesc(`Status: ${status.state}. ${status.sources} sources, ${status.chunks} chunks.`);
+    new Setting(containerEl)
+      .setName('Rebuild index')
+      .setDesc('Recreate search indexes from Vault Markdown. If remote embedding indexing is enabled, this sends Markdown chunks to OpenAI.')
+      .addButton((button) => button
+        .setButtonText('Rebuild')
+        .setDisabled(status.state === 'rebuilding')
+        .onClick(async () => {
+          try {
+            const rebuild = this.prism.rebuildIndex();
+            this.display();
+            await rebuild;
+            new Notice('Prism index rebuilt from Vault Markdown.');
+          } catch {
+            new Notice('Prism could not rebuild the index. Check Vault access, embedding settings, and plugin storage, then retry.');
+          }
+          this.display();
+        }));
   }
 
   private addApiKeySetting(name: string, configured: boolean, save: (value: string) => void): void {
