@@ -13,6 +13,7 @@ async function loadPlugin(savedData, failSave = false, storedSecrets = new Map()
   const notices = [];
   const listeners = new Map();
   const requests = [];
+  const openedFiles = [];
 
   class MockTFile {
     constructor(path, content = '') {
@@ -24,12 +25,15 @@ async function loadPlugin(savedData, failSave = false, storedSecrets = new Map()
   }
 
   class MockPlugin {
-    app = { secretStorage: {
+    app = { workspace: {
+      getLeaf() { return { async openFile(file) { openedFiles.push(file); } }; },
+    }, secretStorage: {
       setSecret(id, value) { storedSecrets.set(id, value); },
       getSecret(id) { return storedSecrets.get(id) ?? null; },
     }, vault: {
       files: [],
       getMarkdownFiles() { return this.files; },
+      getAbstractFileByPath(path) { return this.files.find((file) => file.path === path) ?? null; },
       on(name, callback) { listeners.set(name, callback); return { name }; },
       async read(file) { return file.content; },
     } };
@@ -116,8 +120,28 @@ async function loadPlugin(savedData, failSave = false, storedSecrets = new Map()
 
   const plugin = new module.exports.default();
   await plugin.onload();
-  return { manifest, plugin, tabs, writes, notices, listeners, storedSecrets, MockPlugin, MockTFile, requests };
+  return { manifest, plugin, tabs, writes, notices, listeners, storedSecrets, MockPlugin, MockTFile, requests, openedFiles };
 }
+
+test('citation opens the current Markdown path after a move and ignores missing sources', async () => {
+  const { plugin, MockTFile, openedFiles } = await loadPlugin(null);
+  const source = await plugin.sourceRegistry.create({
+    path: 'old.md', content: '# Note', mtime: 1, size: 6,
+  });
+  const file = new MockTFile('old.md', '# Note');
+  plugin.app.vault.files = [file];
+  const citation = { sourceId: source.source_id, path: 'old.md' };
+  assert.equal(await plugin.openCitation(citation), true);
+  assert.equal(openedFiles.at(-1), file);
+  await plugin.sourceRegistry.movePaths('old.md', 'new.md');
+  file.path = 'new.md';
+  assert.equal(await plugin.openCitation(citation), true);
+  assert.equal(openedFiles.length, 2);
+  plugin.app.vault.files = [];
+  assert.equal(await plugin.openCitation(citation), false);
+  assert.equal(await plugin.openCitation({ sourceId: 'missing' }), false);
+  assert.equal(openedFiles.length, 2);
+});
 
 test('Vault create event updates the local full-text index without embedding credentials', async () => {
   const { plugin, listeners, MockTFile, notices, requests } = await loadPlugin(null);
