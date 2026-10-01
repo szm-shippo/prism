@@ -11,15 +11,29 @@ async function loadPlugin(savedData, failSave = false) {
   const tabs = [];
   const writes = [];
   const notices = [];
+  const listeners = new Map();
+
+  class MockTFile {
+    constructor(path, content = '') {
+      this.path = path;
+      this.extension = path.split('.').at(-1);
+      this.content = content;
+      this.stat = { mtime: 1, size: content.length };
+    }
+  }
 
   class MockPlugin {
-    app = {};
+    app = { vault: {
+      on(name, callback) { listeners.set(name, callback); return { name }; },
+      async read(file) { return file.content; },
+    } };
     async loadData() { return savedData; }
     async saveData(data) {
       if (failSave) throw new Error('storage unavailable');
       writes.push(structuredClone(data));
     }
     addSettingTab(tab) { tabs.push(tab); }
+    registerEvent() {}
   }
 
   class MockPluginSettingTab {
@@ -57,21 +71,23 @@ async function loadPlugin(savedData, failSave = false) {
         PluginSettingTab: MockPluginSettingTab,
         Setting: MockSetting,
         Notice: class { constructor(message) { notices.push(message); } },
+        TFile: MockTFile,
       };
     },
   });
 
   const plugin = new module.exports.default();
   await plugin.onload();
-  return { manifest, plugin, tabs, writes, notices, MockPlugin };
+  return { manifest, plugin, tabs, writes, notices, listeners, MockPlugin, MockTFile };
 }
 
 test('built plugin loads and opens a settings tab with the default Vault notice', async () => {
-  const { manifest, plugin, tabs, MockPlugin } = await loadPlugin(null);
+  const { manifest, plugin, tabs, listeners, MockPlugin } = await loadPlugin(null);
   assert.equal(manifest.id, 'prism');
   assert.equal(manifest.isDesktopOnly, false);
   assert.ok(plugin instanceof MockPlugin);
   assert.equal(tabs.length, 1);
+  assert.ok(listeners.has('create'));
   tabs[0].display();
   assert.equal(tabs[0].containerEl.children[0].toggle.value, true);
   assert.match(tabs[0].containerEl.children[1].text, /Markdown/);
