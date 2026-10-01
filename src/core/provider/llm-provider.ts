@@ -8,6 +8,7 @@ export interface LLMMessage {
 export interface LLMContext {
   sourceId: string;
   content: string;
+  chunkId?: string;
 }
 
 export interface LLMRequest {

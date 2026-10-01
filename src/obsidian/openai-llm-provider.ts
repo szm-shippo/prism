@@ -58,7 +58,8 @@ export class OpenAILLMProvider implements LLMProvider {
       const lastUserIndex = messages.map((message) => message.role).lastIndexOf('user');
       messages.splice(lastUserIndex, 0, {
         role: 'user',
-        content: `Reference material:\n${JSON.stringify(input.context.map(({ sourceId, content }) => ({ sourceId, content })))}`,
+        content: `Reference material:\n${JSON.stringify(input.context.map(({ sourceId, content, chunkId }) =>
+          chunkId === undefined ? { sourceId, content } : { sourceId, chunkId, content }))}`,
       });
     }
 

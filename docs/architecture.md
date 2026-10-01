@@ -61,3 +61,11 @@ Vault の作成・変更・削除イベントは Chunk Registry の更新後に�
 初期の具体実装は `src/obsidian/openai-llm-provider.ts` とし、Obsidian の `requestUrl` から OpenAI の `/v1/responses` へ、メッセージ、参照 context の source ID と本文、モデル ID を送る。context は信頼しない参照データとして最終ユーザーメッセージの前に置き、含まれる指示に従わないよう上位メッセージで指定する。応答の保存を要求しない `store: false` を使う。API キーとモデルは呼び出し側から渡す。送信先は固定し、API の応答本文や通信例外をエラー表示に含めない。
 
 Provider 設定 UI はモデル ID をプラグイン設定データへ保存し、API キーを Obsidian Secret Storage へ保存する。通常の設定画面に保存済みキーを再表示しない。Secret Storage が導入された Obsidian 1.11.4 を最低バージョンとし、送信先・送信内容・目的を設定画面に明示する。Provider の実際の呼び出しは後続のインデックス・質問パイプラインが担当する。
+
+## Source Citation
+
+`CitationAnswerer` は検索で使った chunk ID と source ID を LLM context に渡し、回答中の `[cite:CHUNK_ID]` を出典に変換する。出典のパスと行範囲は回答生成後に Chunk Registry と Source Registry から取得する。入力にない chunk、source ID が一致しない chunk、Vault に存在しないパスの marker は出典として採用しない。戻り値は回答文と構造化された出典の組で、Markdown への遷移と RAG パイプラインへの接続は後続 Issue が担当する。
+
+## Index Controls
+
+設定画面の Advanced 領域は登録済み source と chunk の件数、再構築の状態を表示する。再構築は Vault Markdown から派生インデックスを作り直す既存の処理を呼び出し、失敗時は再試行できる。リモート embedding の同意が有効な場合に Markdown chunk が OpenAI に送信されることを操作位置に表示する。
