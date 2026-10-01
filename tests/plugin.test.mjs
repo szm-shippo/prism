@@ -12,6 +12,7 @@ async function loadPlugin(savedData, failSave = false, storedSecrets = new Map()
   const writes = [];
   const notices = [];
   const listeners = new Map();
+  const requests = [];
 
   class MockTFile {
     constructor(path, content = '') {
@@ -99,23 +100,119 @@ async function loadPlugin(savedData, failSave = false, storedSecrets = new Map()
         Setting: MockSetting,
         Notice: class { constructor(message) { notices.push(message); } },
         TFile: MockTFile,
+        requestUrl: async (request) => {
+          requests.push(request);
+          const inputs = JSON.parse(request.body).input;
+          return { status: 200, text: JSON.stringify({
+            data: inputs.map((_, index) => ({ index, embedding: [index + 1, 1] })),
+          }) };
+        },
       };
     },
   });
 
   const plugin = new module.exports.default();
   await plugin.onload();
-  return { manifest, plugin, tabs, writes, notices, listeners, storedSecrets, MockPlugin, MockTFile };
+  return { manifest, plugin, tabs, writes, notices, listeners, storedSecrets, MockPlugin, MockTFile, requests };
 }
 
 test('Vault create event updates the local full-text index without embedding credentials', async () => {
-  const { plugin, listeners, MockTFile, notices } = await loadPlugin(null);
+  const { plugin, listeners, MockTFile, notices, requests } = await loadPlugin(null);
   const file = new MockTFile('local.md', '# Local search');
   await listeners.get('create')(file);
   assert.equal((await plugin.fullTextSearch.search('Local', 5))[0].sourceId,
     plugin.sourceRegistry.getByPath('local.md').source_id);
   assert.equal(file.content, '# Local search');
   assert.deepEqual(notices, []);
+  assert.deepEqual(requests, []);
+});
+
+test('remote indexing sends only changed chunks after explicit opt-in and stops after opt-out', async () => {
+  const { plugin, listeners, MockTFile, requests, tabs, writes } = await loadPlugin(null);
+  await plugin.setEmbeddingModel('test-embedding-model');
+  plugin.setEmbeddingApiKey('test-key');
+  const file = new MockTFile('private.md', '# First\n## Detail\nBody');
+  await listeners.get('create')(file);
+  assert.equal(requests.length, 0);
+  tabs[0].display();
+  const consent = tabs[0].containerEl.children.find((child) => child.name === 'Send changed chunks to OpenAI for search indexing');
+  assert.equal(consent.toggle.value, false);
+  assert.match(consent.description, /https:\/\/api\.openai\.com\/v1\/embeddings/);
+  assert.match(consent.description, /new or changed Markdown chunks/);
+  await consent.toggle.change(true);
+  assert.equal(requests.length, 0);
+  assert.equal(plugin.settings.allowRemoteEmbeddingIndexing, true);
+  const enabled = await loadPlugin(writes.at(-1));
+  assert.equal(enabled.plugin.settings.allowRemoteEmbeddingIndexing, true);
+  assert.equal(enabled.requests.length, 0);
+  file.content = '# Updated\n## Detail\nBody';
+  file.stat.size = file.content.length;
+  await listeners.get('modify')(file);
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].url, 'https://api.openai.com/v1/embeddings');
+  assert.deepEqual(JSON.parse(requests[0].body).input, ['# Updated', '## Detail\nBody']);
+  assert.equal(writes.at(-1).vectorIndex.entries.length, 2);
+  await listeners.get('modify')(file);
+  assert.equal(requests.length, 1);
+  file.content = '# Updated\n## Detail\nChanged body';
+  file.stat.size = file.content.length;
+  await listeners.get('modify')(file);
+  assert.equal(requests.length, 2);
+  assert.deepEqual(JSON.parse(requests[1].body).input, ['## Detail\nChanged body']);
+  await plugin.setAllowRemoteEmbeddingIndexing(false);
+  const disabled = await loadPlugin(writes.at(-1));
+  assert.equal(disabled.plugin.settings.allowRemoteEmbeddingIndexing, false);
+  file.content = '# Local only';
+  file.stat.size = file.content.length;
+  await listeners.get('modify')(file);
+  assert.equal(requests.length, 2);
+  assert.equal((await plugin.fullTextSearch.search('Local only', 5)).length, 1);
+  assert.equal((await plugin.vectorStore.search([1, 1], 5)).length, 0);
+  await listeners.get('delete')(file);
+  assert.equal((await plugin.fullTextSearch.search('Local only', 5)).length, 0);
+  assert.equal(requests.length, 2);
+});
+
+test('failed consent save leaves remote indexing disabled', async () => {
+  const { plugin, tabs, notices, requests } = await loadPlugin(null, true);
+  tabs[0].display();
+  const consent = tabs[0].containerEl.children.find((child) => child.name === 'Send changed chunks to OpenAI for search indexing');
+  await consent.toggle.change(true);
+  assert.equal(plugin.settings.allowRemoteEmbeddingIndexing, false);
+  assert.equal(consent.toggle.value, false);
+  assert.match(notices[0], /could not save remote indexing consent/);
+  assert.equal(requests.length, 0);
+});
+
+test('missing embedding credentials after opt-in keep local text searchable without a request', async () => {
+  const { plugin, listeners, MockTFile, requests, notices } = await loadPlugin(null);
+  await plugin.setAllowRemoteEmbeddingIndexing(true);
+  const file = new MockTFile('no-key.md', '# Local result');
+  await listeners.get('create')(file);
+  assert.equal(requests.length, 0);
+  assert.equal((await plugin.fullTextSearch.search('Local result', 5)).length, 1);
+  assert.match(notices[0], /embedding settings/);
+  assert.equal(file.content, '# Local result');
+});
+
+test('changing the embedding model discards vectors from the previous model', async () => {
+  const { plugin, listeners, MockTFile, requests, writes } = await loadPlugin(null);
+  await plugin.setEmbeddingModel('model-one');
+  plugin.setEmbeddingApiKey('test-key');
+  await plugin.setAllowRemoteEmbeddingIndexing(true);
+  const file = new MockTFile('model.md', '# Model');
+  await listeners.get('create')(file);
+  assert.equal(requests.length, 1);
+  assert.equal(writes.at(-1).vectorIndexModel, 'model-one');
+  await plugin.setEmbeddingModel('model-two');
+  assert.equal(plugin.vectorStore, undefined);
+  assert.equal(writes.at(-1).vectorIndex, null);
+  assert.equal(requests.length, 1);
+  file.content = '# New model';
+  file.stat.size = file.content.length;
+  await listeners.get('modify')(file);
+  assert.equal(requests.length, 2);
+  assert.equal(writes.at(-1).vectorIndexModel, 'model-two');
 });
 
 test('built plugin loads and opens a settings tab with the default Vault notice', async () => {
@@ -151,6 +248,7 @@ test('invalid saved settings fall back to the default', async () => {
   for (const saved of [null, 'invalid', { showVaultNotice: 'false' }]) {
     const { plugin } = await loadPlugin(saved);
     assert.equal(plugin.settings.showVaultNotice, true);
+    assert.equal(plugin.settings.allowRemoteEmbeddingIndexing, false);
   }
 });
 
