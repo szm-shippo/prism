@@ -9,6 +9,7 @@ import { LocalFullTextSearch } from '../core/index/local-full-text-search';
 import { LocalVectorStore, type VectorStoreState } from '../core/index/local-vector-store';
 import { HybridRetrieval } from '../core/index/hybrid-retrieval';
 import { RetrievalReranker } from '../core/index/retrieval-reranker';
+import { isExcludedPath, parseExcludedPaths } from '../core/index/exclusion-rules';
 import { SourceEventHandler } from './source-events';
 import { OpenAIEmbeddingProvider } from './openai-embedding-provider';
 import { OpenAILLMProvider } from './openai-llm-provider';
@@ -52,6 +53,7 @@ export default class PrismPlugin extends Plugin {
     });
     const fullText = this.fullTextSearch;
     const chunks = this.chunkRegistry;
+    const sources = this.sourceRegistry;
     const vectorStorage = {
       load: async () => this.savedData.vectorIndex,
       save: async (state: VectorStoreState) => {
@@ -116,14 +118,32 @@ export default class PrismPlugin extends Plugin {
         this.vectorStore = undefined;
       },
     };
-    const sourceEvents = new SourceEventHandler(this.app.vault, this.sourceRegistry,
-      new ChunkPipeline(this.sourceRegistry, this.chunkRegistry), indexUpdates);
+    const sourceEvents = new SourceEventHandler(this.app.vault, sources,
+      new ChunkPipeline(sources, chunks), indexUpdates,
+      (path) => isExcludedPath(path, this.settings.excludedPaths));
     this.sourceEvents = sourceEvents;
-    const retrieval = new HybridRetrieval(fullText, {
-      search: async (vector, limit) => vector.length === 0 ? [] :
-        (await getVectorStore())?.search(vector, limit) ?? [],
+    const sourceAllowed = (sourceId: string) => {
+      const source = sources.getById(sourceId);
+      if (!source || isExcludedPath(source.path, this.settings.excludedPaths)) return false;
+      const file = this.app.vault.getAbstractFileByPath(source.path);
+      return file instanceof TFile && file.extension === 'md';
+    };
+    const allowedChunk = (chunkId: string) => {
+      const chunk = chunks.get(chunkId);
+      return chunk && sourceAllowed(chunk.source_id) ? chunk : undefined;
+    };
+    const retrieval = new HybridRetrieval({
+      search: async (query, limit) => (await fullText.search(query, limit))
+        .filter((hit) => sourceAllowed(hit.sourceId)),
+    }, {
+      search: async (vector, limit) => {
+        if (vector.length === 0) return [];
+        const store = await getVectorStore();
+        return (await store?.search(vector, limit) ?? [])
+          .filter((hit) => sourceAllowed(hit.sourceId));
+      },
     });
-    const reranker = new RetrievalReranker((chunkId) => chunks.get(chunkId)?.content);
+    const reranker = new RetrievalReranker((chunkId) => allowedChunk(chunkId)?.content);
     const answerer = new CitationAnswerer({
       generate: (request) => {
         const key = this.app.secretStorage.getSecret('prism-llm-api-key');
@@ -134,7 +154,8 @@ export default class PrismPlugin extends Plugin {
       },
     }, chunks, (path) => {
       const file = this.app.vault.getAbstractFileByPath(path);
-      return file instanceof TFile && file.extension === 'md';
+      return !isExcludedPath(path, this.settings.excludedPaths) &&
+        file instanceof TFile && file.extension === 'md';
     });
     this.ragPipeline = new RagPipeline(async (query) => {
       if (!this.settings.allowRemoteEmbeddingIndexing ||
@@ -143,7 +164,7 @@ export default class PrismPlugin extends Plugin {
       const key = this.app.secretStorage.getSecret('prism-embedding-api-key');
       if (!store || !key || !this.settings.embeddingModel.trim()) return [];
       return new OpenAIEmbeddingProvider(key, this.settings.embeddingModel).embed(query);
-    }, retrieval, reranker, chunks, answerer);
+    }, retrieval, reranker, { get: allowedChunk }, answerer);
     this.registerEvent(this.app.vault.on('create', (file) => {
       return sourceEvents.create(file).catch(() => new Notice('Prism could not index a Markdown source. Check embedding settings and plugin storage.'));
     }));
@@ -170,7 +191,7 @@ export default class PrismPlugin extends Plugin {
 
   async openCitation(citation: Pick<SourceCitation, 'sourceId'>): Promise<boolean> {
     const source = this.sourceRegistry?.getById(citation.sourceId);
-    if (!source) return false;
+    if (!source || isExcludedPath(source.path, this.settings.excludedPaths)) return false;
     const file = this.app.vault.getAbstractFileByPath(source.path);
     if (!(file instanceof TFile) || file.extension !== 'md') return false;
     await this.app.workspace.getLeaf(false).openFile(file);
@@ -213,6 +234,13 @@ export default class PrismPlugin extends Plugin {
   async setAllowRemoteEmbeddingIndexing(value: boolean): Promise<void> {
     await this.savePluginData({ allowRemoteEmbeddingIndexing: value });
     this.settings = { ...this.settings, allowRemoteEmbeddingIndexing: value };
+  }
+
+  async setExcludedPaths(value: string): Promise<void> {
+    const excludedPaths = parseExcludedPaths(value);
+    await this.savePluginData({ excludedPaths });
+    this.settings = { ...this.settings, excludedPaths };
+    await this.sourceEvents?.removeExcluded();
   }
 
   async setLlmModel(value: string): Promise<void> {
@@ -334,6 +362,26 @@ class PrismSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName('Index status')
       .setDesc(`Status: ${status.state}. ${status.sources} sources, ${status.chunks} chunks.`);
+    let readExclusions = () => this.prism.settings.excludedPaths.join('\n');
+    new Setting(containerEl)
+      .setName('Excluded paths')
+      .setDesc('One Vault-relative Markdown file or folder path per line. Folder paths include descendants. Applying removes matching indexed data; rebuild after removing a rule to include those notes again.')
+      .addTextArea((text) => {
+        text.setPlaceholder('Private/\nDraft.md')
+          .setValue(this.prism.settings.excludedPaths.join('\n'));
+        readExclusions = () => text.getValue();
+      })
+      .addButton((button) => button
+        .setButtonText('Apply')
+        .onClick(async () => {
+          try {
+            await this.prism.setExcludedPaths(readExclusions());
+            new Notice('Prism index exclusions applied.');
+            this.display();
+          } catch {
+            new Notice('Prism could not apply index exclusions. Check paths and plugin storage, then retry.');
+          }
+        }));
     new Setting(containerEl)
       .setName('Rebuild index')
       .setDesc('Recreate search indexes from Vault Markdown. If remote embedding indexing is enabled, this sends Markdown chunks to OpenAI.')
