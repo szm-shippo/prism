@@ -7,24 +7,24 @@ export class SourceEventHandler {
   private pending: Promise<unknown> = Promise.resolve();
 
   constructor(
-    private readonly vault: Pick<Vault, 'read'>,
+    private readonly vault: Pick<Vault, 'read' | 'getMarkdownFiles'>,
     private readonly registry: SourceRegistry,
     private readonly chunks?: ChunkPipeline,
-    private readonly indexes?: Pick<IndexUpdateOrchestrator, 'sync' | 'delete'>,
+    private readonly indexes?: Pick<IndexUpdateOrchestrator, 'sync' | 'delete'> & { clear(): Promise<void> },
   ) {}
 
   create(file: TAbstractFile): Promise<void> {
+    return this.enqueue(() => this.indexFile(file));
+  }
+
+  rebuild(): Promise<void> {
     return this.enqueue(async () => {
-      if (!(file instanceof TFile) || file.extension !== 'md') return;
-      const content = await this.vault.read(file);
-      const source = this.registry.getByPath(file.path) ?? await this.registry.create({
-        path: file.path,
-        content,
-        mtime: file.stat.mtime,
-        size: file.stat.size,
-      });
-      await this.chunks?.sync(source.source_id, content);
-      await this.indexes?.sync(source.source_id);
+      if (!this.chunks || !this.indexes) throw new Error('Index rebuild requires chunks and indexes.');
+      const files = this.vault.getMarkdownFiles();
+      await this.indexes.clear();
+      await this.chunks.clear();
+      await this.registry.clear();
+      for (const file of files) await this.indexFile(file);
     });
   }
 
@@ -99,5 +99,18 @@ export class SourceEventHandler {
     const result = this.pending.then(operation);
     this.pending = result.then(() => undefined, () => undefined);
     return result;
+  }
+
+  private async indexFile(file: TAbstractFile): Promise<void> {
+    if (!(file instanceof TFile) || file.extension !== 'md') return;
+    const content = await this.vault.read(file);
+    const source = this.registry.getByPath(file.path) ?? await this.registry.create({
+      path: file.path,
+      content,
+      mtime: file.stat.mtime,
+      size: file.stat.size,
+    });
+    await this.chunks?.sync(source.source_id, content);
+    await this.indexes?.sync(source.source_id);
   }
 }

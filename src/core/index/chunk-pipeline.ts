@@ -5,7 +5,7 @@ import type { SourceRegistry } from './source-registry';
 export class ChunkPipeline {
   constructor(
     private readonly sources: Pick<SourceRegistry, 'getById'>,
-    private readonly chunks: Pick<ChunkRegistry, 'replaceBySource' | 'deleteBySource'>,
+    private readonly chunks: Pick<ChunkRegistry, 'replaceBySource' | 'deleteBySource' | 'clear'>,
   ) {}
 
   async sync(sourceId: string, markdown: string): Promise<void> {
@@ -16,5 +16,9 @@ export class ChunkPipeline {
 
   async delete(sourceId: string): Promise<void> {
     await this.chunks.deleteBySource(sourceId);
+  }
+
+  async clear(): Promise<void> {
+    await this.chunks.clear();
   }
 }
