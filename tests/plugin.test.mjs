@@ -4,6 +4,40 @@ import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import { runInNewContext } from 'node:vm';
 
+class MockElement {
+  constructor(tag) {
+    this.tag = tag;
+    this.children = [];
+    this.listeners = new Map();
+    this.style = {};
+    this.textContent = '';
+    this.value = '';
+    this.disabled = false;
+  }
+
+  empty() { this.children = []; this.textContent = ''; }
+  createEl(tag, options = {}) {
+    const child = new MockElement(tag);
+    child.textContent = options.text ?? '';
+    child.attributes = options.attr ?? {};
+    this.children.push(child);
+    return child;
+  }
+  createDiv(options) { return this.createEl('div', options); }
+  addEventListener(name, callback) { this.listeners.set(name, callback); }
+  focus() { this.focused = true; }
+  submit() { return this.listeners.get('submit')({ preventDefault() {} }); }
+}
+
+function findElement(root, predicate) {
+  if (predicate(root)) return root;
+  for (const child of root.children) {
+    const found = findElement(child, predicate);
+    if (found) return found;
+  }
+  return undefined;
+}
+
 async function loadPlugin(savedData, failSave = false, storedSecrets = new Map()) {
   const manifest = JSON.parse(await readFile(new URL('../manifest.json', import.meta.url), 'utf8'));
   const bundle = await readFile(new URL('../main.js', import.meta.url), 'utf8');
@@ -14,6 +48,22 @@ async function loadPlugin(savedData, failSave = false, storedSecrets = new Map()
   const listeners = new Map();
   const requests = [];
   const openedFiles = [];
+  const viewFactories = new Map();
+  const commands = [];
+  const ribbonIcons = [];
+  const leaves = [];
+  const revealed = [];
+
+  class MockLeaf {
+    async openFile(file) { openedFiles.push(file); }
+    async setViewState(state) {
+      this.state = state;
+      if (!this.view) {
+        this.view = viewFactories.get(state.type)(this);
+        await this.view.onOpen();
+      }
+    }
+  }
 
   class MockTFile {
     constructor(path, content = '') {
@@ -26,7 +76,9 @@ async function loadPlugin(savedData, failSave = false, storedSecrets = new Map()
 
   class MockPlugin {
     app = { workspace: {
-      getLeaf() { return { async openFile(file) { openedFiles.push(file); } }; },
+      getLeaf() { const leaf = new MockLeaf(); leaves.push(leaf); return leaf; },
+      getLeavesOfType(type) { return leaves.filter((leaf) => leaf.state?.type === type); },
+      async revealLeaf(leaf) { revealed.push(leaf); },
     }, secretStorage: {
       setSecret(id, value) { storedSecrets.set(id, value); },
       getSecret(id) { return storedSecrets.get(id) ?? null; },
@@ -44,6 +96,13 @@ async function loadPlugin(savedData, failSave = false, storedSecrets = new Map()
     }
     addSettingTab(tab) { tabs.push(tab); }
     registerEvent() {}
+    registerView(type, factory) { viewFactories.set(type, factory); }
+    addCommand(command) { commands.push(command); }
+    addRibbonIcon(icon, title, callback) { ribbonIcons.push({ icon, title, callback }); return {}; }
+  }
+
+  class MockItemView {
+    constructor(leaf) { this.leaf = leaf; this.contentEl = new MockElement('div'); }
   }
 
   class MockPluginSettingTab {
@@ -114,6 +173,7 @@ async function loadPlugin(savedData, failSave = false, storedSecrets = new Map()
       assert.equal(specifier, 'obsidian');
       return {
         Plugin: MockPlugin,
+        ItemView: MockItemView,
         PluginSettingTab: MockPluginSettingTab,
         Setting: MockSetting,
         Notice: class { constructor(message) { notices.push(message); } },
@@ -139,8 +199,76 @@ async function loadPlugin(savedData, failSave = false, storedSecrets = new Map()
 
   const plugin = new module.exports.default();
   await plugin.onload();
-  return { manifest, plugin, tabs, writes, notices, listeners, storedSecrets, MockPlugin, MockTFile, requests, openedFiles };
+  return { manifest, plugin, tabs, writes, notices, listeners, storedSecrets, MockPlugin, MockTFile,
+    requests, openedFiles, commands, ribbonIcons, leaves, revealed };
 }
+
+test('Ask command opens one view and submits a query through RAG with visible citations', async () => {
+  const { plugin, listeners, MockTFile, commands, ribbonIcons, leaves, revealed, requests, writes } =
+    await loadPlugin(null);
+  await plugin.setLlmModel('answer-model');
+  plugin.setLlmApiKey('test-key');
+  const file = new MockTFile('facts.md', '# Local fact');
+  plugin.app.vault.files = [file];
+  await listeners.get('create')(file);
+  const open = commands.find((command) => command.id === 'open-chat');
+  assert.ok(open);
+  await open.callback();
+  assert.equal(leaves.length, 1);
+  assert.equal(revealed.length, 1);
+  const view = leaves[0].view;
+  assert.equal(view.getDisplayText(), 'Prism Ask');
+  const input = findElement(view.contentEl, (element) => element.tag === 'textarea');
+  const form = findElement(view.contentEl, (element) => element.tag === 'form');
+  input.value = 'Local';
+  await form.submit();
+  assert.equal(view.contentEl.children.at(-2).textContent, 'Grounded answer [^1]');
+  const citation = findElement(view.contentEl, (element) => element.tag === 'li');
+  assert.match(citation.textContent, /facts\.md \(lines 1–1\)/u);
+  assert.equal(requests.length, 1);
+  assert.equal(file.content, '# Local fact');
+  assert.doesNotMatch(JSON.stringify(writes), /Grounded answer/);
+  await ribbonIcons[0].callback();
+  assert.equal(leaves.length, 1);
+  assert.equal(revealed.length, 2);
+});
+
+test('Ask view validates input, shows loading and safe errors, then renders answer as text', async () => {
+  const { plugin, commands, leaves } = await loadPlugin(null);
+  await commands.find((command) => command.id === 'open-chat').callback();
+  const view = leaves[0].view;
+  const form = findElement(view.contentEl, (element) => element.tag === 'form');
+  const input = findElement(view.contentEl, (element) => element.tag === 'textarea');
+  const button = findElement(view.contentEl, (element) => element.tag === 'button');
+  const status = findElement(view.contentEl, (element) => element.attributes?.role === 'status');
+  let calls = 0;
+  plugin.answerQuery = () => { calls += 1; return Promise.reject(new Error('private note contents')); };
+  await form.submit();
+  assert.equal(status.textContent, 'Enter a question.');
+  assert.equal(input.focused, true);
+  assert.equal(calls, 0);
+  input.value = 'Question';
+  let fail;
+  plugin.answerQuery = () => { calls += 1; return new Promise((_resolve, reject) => { fail = reject; }); };
+  const pending = form.submit();
+  assert.equal(status.textContent, 'Answering…');
+  assert.equal(button.disabled, true);
+  await form.submit();
+  assert.equal(calls, 1);
+  fail(new Error('private note contents'));
+  await pending;
+  assert.match(status.textContent, /Check provider settings, indexing, and network/);
+  assert.doesNotMatch(status.textContent, /private note contents/);
+  assert.equal(button.disabled, false);
+  plugin.answerQuery = async () => ({ content: '<img src=x onerror=alert(1)>', citations: [{
+    sourceId: 'one', chunkId: 'one', path: '<b>source.md', startLine: 2, endLine: 3,
+  }] });
+  await form.submit();
+  assert.equal(view.contentEl.children.at(-2).textContent, '<img src=x onerror=alert(1)>');
+  assert.equal(findElement(view.contentEl, (element) => element.tag === 'img'), undefined);
+  assert.match(findElement(view.contentEl, (element) => element.tag === 'li').textContent, /<b>source\.md/);
+  assert.equal(status.textContent, 'Answer ready.');
+});
 
 test('citation opens the current Markdown path after a move and ignores missing sources', async () => {
   const { plugin, MockTFile, openedFiles } = await loadPlugin(null);
