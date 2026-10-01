@@ -38,6 +38,8 @@ Markdown の削除イベントでは対象 Source の Chunk を除いてから R
 
 `hybrid-retrieval.ts` はテキストとクエリ Vector を受け取り、全文検索と Vector 検索を呼び出す。同じ Chunk ID は一件にまとめ、各検索結果の順位の逆数を加算して候補を並べる。両ストアのスコア尺度に依存せず、同じ Chunk ID に異なる Source ID が付いていれば再構築を要する不整合として拒否する。最終的な再順位付けは後続 Issue で行う。
 
+Vault の作成・変更・削除イベントは Chunk Registry の更新後にローカル全文検索へ反映する。`index-update-orchestrator.ts` は同じ Source の Chunk を EmbeddingProvider、全文検索、VectorStore に反映する契約を実装し、Embedding を検証してから検索ストアを書き換える。再実行時はその Source の旧エントリを削除してから登録するため、途中の保存失敗後にも再同期できる。リモート Embedding を Vault イベントへ自動接続するには、Vault 内容を外部へ送ることへの明示的な同意が必要である。
+
 ## Markdown Chunker
 
 `src/core/index/markdown-chunker.ts` は見出し行（コードフェンス外）を境界にして、見出しと本文をひとつの Chunk にする。各 Chunk の `location` は元 Markdown の1始まりの行番号で、`content_hash` は内容から、`chunk_id` は source ID・開始行・内容から決定的に算出する。再実行時に同じ入力から同じ ID を得られるようにするためであり、これらは Vault Markdown から再生成できる派生値である。現在の分割は見出し単位で、長さによる再分割は行わない。

@@ -2,6 +2,7 @@ import { Notice, Plugin, PluginSettingTab, Setting } from 'obsidian';
 import { SourceRegistry, type SourceRecord } from '../core/index/source-registry';
 import { ChunkRegistry } from '../core/index/chunk-registry';
 import { ChunkPipeline } from '../core/index/chunk-pipeline';
+import { LocalFullTextSearch } from '../core/index/local-full-text-search';
 import { SourceEventHandler } from './source-events';
 import { loadSettings, type PluginSettings } from '../settings';
 
@@ -9,6 +10,7 @@ export default class PrismPlugin extends Plugin {
   settings: PluginSettings = loadSettings(null);
   sourceRegistry?: SourceRegistry;
   chunkRegistry?: ChunkRegistry;
+  fullTextSearch?: LocalFullTextSearch;
   private savedData: Record<string, unknown> = {};
   private dataWrite: Promise<void> = Promise.resolve();
 
@@ -29,19 +31,37 @@ export default class PrismPlugin extends Plugin {
         await this.savePluginData({ chunkRegistry: chunks });
       },
     }, this.sourceRegistry);
+    this.fullTextSearch = await LocalFullTextSearch.open({
+      load: async () => this.savedData.fullTextIndex,
+      save: async (entries) => {
+        await this.savePluginData({ fullTextIndex: entries });
+      },
+    });
+    const fullText = this.fullTextSearch;
+    const chunks = this.chunkRegistry;
+    const indexUpdates = {
+      sync: async (sourceId: string): Promise<void> => {
+        const current = chunks.listBySource(sourceId);
+        await fullText.deleteBySource(sourceId);
+        await fullText.index(current);
+      },
+      delete: async (sourceId: string): Promise<void> => {
+        await fullText.deleteBySource(sourceId);
+      },
+    };
     const sourceEvents = new SourceEventHandler(this.app.vault, this.sourceRegistry,
-      new ChunkPipeline(this.sourceRegistry, this.chunkRegistry));
+      new ChunkPipeline(this.sourceRegistry, this.chunkRegistry), indexUpdates);
     this.registerEvent(this.app.vault.on('create', (file) => {
-      void sourceEvents.create(file).catch(() => new Notice('Prism could not register a Markdown source. Check plugin storage.'));
+      return sourceEvents.create(file).catch(() => new Notice('Prism could not register a Markdown source. Check plugin storage.'));
     }));
     this.registerEvent(this.app.vault.on('modify', (file) => {
-      void sourceEvents.modify(file).catch(() => new Notice('Prism could not update a Markdown source. Check plugin storage.'));
+      return sourceEvents.modify(file).catch(() => new Notice('Prism could not update a Markdown source. Check plugin storage.'));
     }));
     this.registerEvent(this.app.vault.on('rename', (file, oldPath) => {
-      void sourceEvents.rename(file, oldPath).catch(() => new Notice('Prism could not move a Markdown source. Check plugin storage.'));
+      return sourceEvents.rename(file, oldPath).catch(() => new Notice('Prism could not move a Markdown source. Check plugin storage.'));
     }));
     this.registerEvent(this.app.vault.on('delete', (file) => {
-      void sourceEvents.delete(file).catch(() => new Notice('Prism could not remove a Markdown source. Check plugin storage.'));
+      return sourceEvents.delete(file).catch(() => new Notice('Prism could not remove a Markdown source. Check plugin storage.'));
     }));
     this.addSettingTab(new PrismSettingTab(this));
   }
