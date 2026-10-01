@@ -18,9 +18,13 @@ interface SourceInput {
   size: number;
 }
 
+function validVaultPath(path: string): boolean {
+  return !path.startsWith('/') &&
+    !path.split('/').some((part) => part === '' || part === '.' || part === '..' || /[\\:\0]/.test(part));
+}
+
 function validPath(path: string): boolean {
-  return path.endsWith('.md') && !path.startsWith('/') &&
-    !path.split('/').some((part) => part === '' || part === '.' || part === '..' || part.includes('\\'));
+  return path.endsWith('.md') && validVaultPath(path);
 }
 
 function validateInput(input: SourceInput): void {
@@ -117,6 +121,26 @@ export class SourceRegistry {
     if (next.length === this.records.length) return false;
     await this.commit(next);
     return true;
+  }
+
+  async movePaths(oldPath: string, newPath: string): Promise<string[]> {
+    if (!validVaultPath(oldPath) || !validVaultPath(newPath)) {
+      throw new Error('Vault-relative paths are required to move sources.');
+    }
+    const movedIds: string[] = [];
+    const next = this.records.map((record) => {
+      if (record.path !== oldPath && !record.path.startsWith(`${oldPath}/`)) return record;
+      const path = `${newPath}${record.path.slice(oldPath.length)}`;
+      if (!validPath(path)) throw new Error('Moved source must remain a Markdown path.');
+      movedIds.push(record.source_id);
+      return { ...record, path };
+    });
+    if (movedIds.length === 0) return [];
+    if (new Set(next.map((record) => record.path)).size !== next.length) {
+      throw new Error('Moved source path already exists in the registry.');
+    }
+    await this.commit(next);
+    return movedIds;
   }
 
   private async commit(next: SourceRecord[]): Promise<void> {

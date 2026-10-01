@@ -108,3 +108,42 @@ test('modify ignores non-Markdown and unknown sources', async () => {
   assert.equal(await handler.modify(new TFile('photo.png', 'binary')), undefined);
   assert.equal(await handler.modify(new TFile('unknown.md', '# Unknown')), undefined);
 });
+
+test('renaming a Markdown file preserves its source ID and updates the path', async () => {
+  const registry = await makeRegistry();
+  const handler = new SourceEventHandler({ read: async (file) => file.content }, registry);
+  const file = new TFile('Notes/original.md', '# Note');
+  await handler.create(file);
+  const sourceId = registry.getByPath(file.path).source_id;
+  file.path = 'Moved/renamed.md';
+  file.extension = 'md';
+  assert.deepEqual(structuredClone(await handler.rename(file, 'Notes/original.md')), [sourceId]);
+  assert.equal(registry.getByPath('Notes/original.md'), undefined);
+  assert.equal(registry.getByPath(file.path).source_id, sourceId);
+  assert.deepEqual(structuredClone(await handler.rename(file, 'Notes/original.md')), []);
+});
+
+test('renaming a folder moves all contained Markdown paths without changing IDs', async () => {
+  const registry = await makeRegistry();
+  const handler = new SourceEventHandler({ read: async (file) => file.content }, registry);
+  await handler.create(new TFile('Old/one.md', 'One'));
+  await handler.create(new TFile('Old/Nested/two.md', 'Two'));
+  const originalIds = registry.list().map((record) => record.source_id);
+  const movedIds = await handler.rename({ path: 'New' }, 'Old');
+  assert.deepEqual(structuredClone(movedIds), originalIds);
+  assert.deepEqual(registry.list().map((record) => record.path), ['New/one.md', 'New/Nested/two.md']);
+});
+
+test('extension changes add or remove Markdown sources', async () => {
+  const registry = await makeRegistry();
+  const handler = new SourceEventHandler({ read: async (file) => file.content }, registry);
+  const file = new TFile('draft.txt', '# Draft');
+  file.path = 'draft.md';
+  file.extension = 'md';
+  const [sourceId] = await handler.rename(file, 'draft.txt');
+  assert.equal(registry.getByPath('draft.md').source_id, sourceId);
+  file.path = 'draft.txt';
+  file.extension = 'txt';
+  assert.deepEqual(structuredClone(await handler.rename(file, 'draft.md')), [sourceId]);
+  assert.equal(registry.getById(sourceId), undefined);
+});

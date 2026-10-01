@@ -41,6 +41,27 @@ export class SourceEventHandler {
     });
   }
 
+  rename(file: TAbstractFile, oldPath: string): Promise<string[]> {
+    return this.enqueue(async () => {
+      if (file instanceof TFile) {
+        const existing = this.registry.getByPath(oldPath);
+        if (file.extension !== 'md') {
+          if (existing) await this.registry.delete(existing.source_id);
+          return existing ? [existing.source_id] : [];
+        }
+        if (!existing) {
+          if (this.registry.getByPath(file.path)) return [];
+          const content = await this.vault.read(file);
+          const created = await this.registry.create({
+            path: file.path, content, mtime: file.stat.mtime, size: file.stat.size,
+          });
+          return [created.source_id];
+        }
+      }
+      return this.registry.movePaths(oldPath, file.path);
+    });
+  }
+
   private enqueue<T>(operation: () => Promise<T>): Promise<T> {
     const result = this.pending.then(operation);
     this.pending = result.then(() => undefined, () => undefined);
