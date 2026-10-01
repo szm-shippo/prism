@@ -90,6 +90,7 @@ test('built plugin loads and opens a settings tab with the default Vault notice'
   assert.ok(listeners.has('create'));
   assert.ok(listeners.has('modify'));
   assert.ok(listeners.has('rename'));
+  assert.ok(listeners.has('delete'));
   tabs[0].display();
   assert.equal(tabs[0].containerEl.children[0].toggle.value, true);
   assert.match(tabs[0].containerEl.children[1].text, /Markdown/);

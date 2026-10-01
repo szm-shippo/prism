@@ -123,6 +123,15 @@ export class SourceRegistry {
     return true;
   }
 
+  async deletePaths(path: string): Promise<string[]> {
+    if (!validVaultPath(path)) throw new Error('A Vault-relative path is required to delete sources.');
+    const removed = this.records.filter((record) => record.path === path || record.path.startsWith(`${path}/`));
+    if (removed.length === 0) return [];
+    const removedIds = new Set(removed.map((record) => record.source_id));
+    await this.commit(this.records.filter((record) => !removedIds.has(record.source_id)));
+    return removed.map((record) => record.source_id);
+  }
+
   async movePaths(oldPath: string, newPath: string): Promise<string[]> {
     if (!validVaultPath(oldPath) || !validVaultPath(newPath)) {
       throw new Error('Vault-relative paths are required to move sources.');
