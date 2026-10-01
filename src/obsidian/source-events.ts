@@ -1,6 +1,7 @@
 import { TFile, type TAbstractFile, type Vault } from 'obsidian';
 import { hashSourceContent, type SourceRegistry } from '../core/index/source-registry';
 import type { ChunkPipeline } from '../core/index/chunk-pipeline';
+import type { IndexUpdateOrchestrator } from '../core/index/index-update-orchestrator';
 
 export class SourceEventHandler {
   private pending: Promise<unknown> = Promise.resolve();
@@ -9,6 +10,7 @@ export class SourceEventHandler {
     private readonly vault: Pick<Vault, 'read'>,
     private readonly registry: SourceRegistry,
     private readonly chunks?: ChunkPipeline,
+    private readonly indexes?: Pick<IndexUpdateOrchestrator, 'sync' | 'delete'>,
   ) {}
 
   create(file: TAbstractFile): Promise<void> {
@@ -22,6 +24,7 @@ export class SourceEventHandler {
         size: file.stat.size,
       });
       await this.chunks?.sync(source.source_id, content);
+      await this.indexes?.sync(source.source_id);
     });
   }
 
@@ -41,6 +44,7 @@ export class SourceEventHandler {
         });
       }
       await this.chunks?.sync(existing.source_id, content);
+      await this.indexes?.sync(existing.source_id);
       return { sourceId: existing.source_id, contentChanged };
     });
   }
@@ -51,6 +55,7 @@ export class SourceEventHandler {
         const existing = this.registry.getByPath(oldPath);
         if (file.extension !== 'md') {
           if (existing) {
+            await this.indexes?.delete(existing.source_id);
             await this.chunks?.delete(existing.source_id);
             await this.registry.delete(existing.source_id);
           }
@@ -61,6 +66,7 @@ export class SourceEventHandler {
           if (registered) {
             const content = await this.vault.read(file);
             await this.chunks?.sync(registered.source_id, content);
+            await this.indexes?.sync(registered.source_id);
             return [];
           }
           const content = await this.vault.read(file);
@@ -68,6 +74,7 @@ export class SourceEventHandler {
             path: file.path, content, mtime: file.stat.mtime, size: file.stat.size,
           });
           await this.chunks?.sync(created.source_id, content);
+          await this.indexes?.sync(created.source_id);
           return [created.source_id];
         }
       }
@@ -80,7 +87,10 @@ export class SourceEventHandler {
       if (file instanceof TFile && file.extension !== 'md') return [];
       const removed = this.registry.list().filter((source) =>
         source.path === file.path || source.path.startsWith(`${file.path}/`));
-      for (const source of removed) await this.chunks?.delete(source.source_id);
+      for (const source of removed) {
+        await this.indexes?.delete(source.source_id);
+        await this.chunks?.delete(source.source_id);
+      }
       return this.registry.deletePaths(file.path);
     });
   }

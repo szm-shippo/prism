@@ -108,6 +108,16 @@ async function loadPlugin(savedData, failSave = false, storedSecrets = new Map()
   return { manifest, plugin, tabs, writes, notices, listeners, storedSecrets, MockPlugin, MockTFile };
 }
 
+test('Vault create event updates the local full-text index without embedding credentials', async () => {
+  const { plugin, listeners, MockTFile, notices } = await loadPlugin(null);
+  const file = new MockTFile('local.md', '# Local search');
+  await listeners.get('create')(file);
+  assert.equal((await plugin.fullTextSearch.search('Local', 5))[0].sourceId,
+    plugin.sourceRegistry.getByPath('local.md').source_id);
+  assert.equal(file.content, '# Local search');
+  assert.deepEqual(notices, []);
+});
+
 test('built plugin loads and opens a settings tab with the default Vault notice', async () => {
   const { manifest, plugin, tabs, listeners, MockPlugin } = await loadPlugin(null);
   assert.equal(manifest.id, 'prism');

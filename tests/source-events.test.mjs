@@ -23,6 +23,12 @@ const chunkRegistryBundle = await bundle('../src/core/index/chunk-registry.ts');
 const { ChunkRegistry } = await import(`data:text/javascript;base64,${Buffer.from(chunkRegistryBundle.contents).toString('base64')}`);
 const pipelineBundle = await bundle('../src/core/index/chunk-pipeline.ts');
 const { ChunkPipeline } = await import(`data:text/javascript;base64,${Buffer.from(pipelineBundle.contents).toString('base64')}`);
+const indexUpdatesBundle = await bundle('../src/core/index/index-update-orchestrator.ts');
+const { IndexUpdateOrchestrator } = await import(`data:text/javascript;base64,${Buffer.from(indexUpdatesBundle.contents).toString('base64')}`);
+const fullTextBundle = await bundle('../src/core/index/local-full-text-search.ts');
+const { LocalFullTextSearch } = await import(`data:text/javascript;base64,${Buffer.from(fullTextBundle.contents).toString('base64')}`);
+const vectorStoreBundle = await bundle('../src/core/index/local-vector-store.ts');
+const { LocalVectorStore } = await import(`data:text/javascript;base64,${Buffer.from(vectorStoreBundle.contents).toString('base64')}`);
 
 class TFile {
   constructor(path, content) {
@@ -99,6 +105,31 @@ test('failed chunk persistence leaves Markdown untouched and a duplicate create 
   fail = false;
   await handler.create(file);
   assert.equal(chunks.listBySource(registry.getByPath(file.path).source_id).length, 1);
+});
+
+test('Vault events synchronize text and vector indexes without changing the source file', async () => {
+  const registry = await makeRegistry();
+  const chunks = await ChunkRegistry.open({ load: async () => undefined, save: async () => {} }, registry);
+  const fullText = await LocalFullTextSearch.open({ load: async () => undefined, save: async () => {} });
+  const vectors = await LocalVectorStore.open({ load: async () => undefined, save: async () => {} }, 2);
+  const indexes = new IndexUpdateOrchestrator(chunks, fullText,
+    { embedBatch: async (texts) => texts.map((text) => text.includes('New') ? [0, 1] : [1, 0]) },
+    async () => vectors);
+  const handler = new SourceEventHandler({ read: async (file) => file.content }, registry,
+    new ChunkPipeline(registry, chunks), indexes);
+  const file = new TFile('indexed.md', '# Old');
+  await handler.create(file);
+  assert.equal((await fullText.search('Old', 5)).length, 1);
+  assert.equal((await vectors.search([1, 0], 5)).length, 1);
+  file.content = '# New';
+  file.stat.size = file.content.length;
+  await handler.modify(file);
+  assert.deepEqual(await fullText.search('Old', 5), []);
+  assert.equal((await fullText.search('New', 5)).length, 1);
+  await handler.delete(file);
+  assert.deepEqual(await fullText.search('New', 5), []);
+  assert.deepEqual(await vectors.search([0, 1], 5), []);
+  assert.equal(file.content, '# New');
 });
 
 test('Markdown create event stores source metadata and ignores duplicate events', async () => {
