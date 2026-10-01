@@ -147,3 +147,26 @@ test('extension changes add or remove Markdown sources', async () => {
   assert.deepEqual(structuredClone(await handler.rename(file, 'draft.md')), [sourceId]);
   assert.equal(registry.getById(sourceId), undefined);
 });
+
+test('Markdown delete removes the source and returns its ID for downstream cleanup', async () => {
+  const registry = await makeRegistry();
+  const handler = new SourceEventHandler({ read: async (file) => file.content }, registry);
+  const file = new TFile('Notes/remove.md', 'Content');
+  await handler.create(file);
+  const sourceId = registry.getByPath(file.path).source_id;
+  assert.deepEqual(structuredClone(await handler.delete(file)), [sourceId]);
+  assert.equal(registry.getById(sourceId), undefined);
+  assert.deepEqual(structuredClone(await handler.delete(file)), []);
+});
+
+test('folder delete removes descendants and ignores non-Markdown files', async () => {
+  const registry = await makeRegistry();
+  const handler = new SourceEventHandler({ read: async (file) => file.content }, registry);
+  await handler.create(new TFile('Folder/a.md', 'A'));
+  await handler.create(new TFile('Folder/Nested/b.md', 'B'));
+  await handler.create(new TFile('Elsewhere/c.md', 'C'));
+  const deleted = await handler.delete({ path: 'Folder' });
+  assert.equal(deleted.length, 2);
+  assert.deepEqual(registry.list().map((record) => record.path), ['Elsewhere/c.md']);
+  assert.deepEqual(structuredClone(await handler.delete(new TFile('photo.png', 'binary'))), []);
+});

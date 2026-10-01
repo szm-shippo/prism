@@ -62,6 +62,13 @@ export class SourceEventHandler {
     });
   }
 
+  delete(file: TAbstractFile): Promise<string[]> {
+    return this.enqueue(async () => {
+      if (file instanceof TFile && file.extension !== 'md') return [];
+      return this.registry.deletePaths(file.path);
+    });
+  }
+
   private enqueue<T>(operation: () => Promise<T>): Promise<T> {
     const result = this.pending.then(operation);
     this.pending = result.then(() => undefined, () => undefined);

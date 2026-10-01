@@ -29,6 +29,9 @@ export default class PrismPlugin extends Plugin {
     this.registerEvent(this.app.vault.on('rename', (file, oldPath) => {
       void sourceEvents.rename(file, oldPath).catch(() => new Notice('Prism could not move a Markdown source. Check plugin storage.'));
     }));
+    this.registerEvent(this.app.vault.on('delete', (file) => {
+      void sourceEvents.delete(file).catch(() => new Notice('Prism could not remove a Markdown source. Check plugin storage.'));
+    }));
     this.addSettingTab(new PrismSettingTab(this));
   }
 

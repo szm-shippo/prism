@@ -24,6 +24,8 @@ Markdown 更新イベントでは現在の内容の SHA-256 と Registry の値�
 
 Markdown のファイル名変更・移動はパスだけを更新し、source ID と内容ハッシュを維持する。フォルダ移動では配下の Markdown パスを一度に更新する。拡張子が Markdown に変わったファイルは新規登録し、Markdown から外れたファイルは Registry から除く。
 
+Markdown の削除イベントでは対応する Registry レコードを除き、削除した source ID を返す。フォルダ削除では配下の source ID をまとめて返す。Chunk や検索インデックスの削除は後続のパイプラインで行う。
+
 ## Markdown Chunker
 
 `src/core/index/markdown-chunker.ts` は見出し行（コードフェンス外）を境界にして、見出しと本文をひとつの Chunk にする。各 Chunk の `location` は元 Markdown の1始まりの行番号で、`content_hash` は内容から、`chunk_id` は source ID・開始行・内容から決定的に算出する。再実行時に同じ入力から同じ ID を得られるようにするためであり、これらは Vault Markdown から再生成できる派生値である。現在の分割は見出し単位で、長さによる再分割は行わない。
