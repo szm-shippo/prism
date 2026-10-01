@@ -14,6 +14,10 @@ Core は `obsidian` パッケージ、`src/obsidian/`、`src/presentation/` を 
 
 Vault Markdown が知識の正本である。検索用データは Vault から再構築できる派生データとして扱い、Core の実装から Vault を直接変更しない。具体的なデータ型や Provider 契約は、それらを使う Issue で定義する。
 
+## Source Registry
+
+`src/core/index/source-registry.ts` は Markdown source の ID、Vault 相対パス、内容の SHA-256、更新時刻、サイズを保持する。ID は登録時に生成し、パス変更時にも維持する。レコードはプラグインの保存データ内に置き、設定と共存させる。保存に失敗した操作はメモリ上でも確定しない。不正な保存データは上書きせず、Vault Markdown からの再構築が必要なエラーとして扱う。再構築後の ID は変わり得るため、Registry 全体を派生データとして扱う。
+
 ## Markdown Chunker
 
 `src/core/index/markdown-chunker.ts` は見出し行（コードフェンス外）を境界にして、見出しと本文をひとつの Chunk にする。各 Chunk の `location` は元 Markdown の1始まりの行番号で、`content_hash` は内容から、`chunk_id` は source ID・開始行・内容から決定的に算出する。再実行時に同じ入力から同じ ID を得られるようにするためであり、これらは Vault Markdown から再生成できる派生値である。現在の分割は見出し単位で、長さによる再分割は行わない。
