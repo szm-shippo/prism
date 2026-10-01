@@ -1,6 +1,7 @@
 import { Notice, Plugin, PluginSettingTab, Setting } from 'obsidian';
 import { SourceRegistry, type SourceRecord } from '../core/index/source-registry';
 import { ChunkRegistry } from '../core/index/chunk-registry';
+import { ChunkPipeline } from '../core/index/chunk-pipeline';
 import { SourceEventHandler } from './source-events';
 import { loadSettings, type PluginSettings } from '../settings';
 
@@ -28,7 +29,8 @@ export default class PrismPlugin extends Plugin {
         await this.savePluginData({ chunkRegistry: chunks });
       },
     }, this.sourceRegistry);
-    const sourceEvents = new SourceEventHandler(this.app.vault, this.sourceRegistry);
+    const sourceEvents = new SourceEventHandler(this.app.vault, this.sourceRegistry,
+      new ChunkPipeline(this.sourceRegistry, this.chunkRegistry));
     this.registerEvent(this.app.vault.on('create', (file) => {
       void sourceEvents.create(file).catch(() => new Notice('Prism could not register a Markdown source. Check plugin storage.'));
     }));

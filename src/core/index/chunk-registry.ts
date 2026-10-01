@@ -79,6 +79,35 @@ export class ChunkRegistry {
     return removed;
   }
 
+  provenance(chunkId: string): { sourceId: string; path: string; startLine: number; endLine: number } | undefined {
+    const chunk = this.get(chunkId);
+    if (!chunk) return undefined;
+    const source = this.sources.getById(chunk.source_id);
+    if (!source) return undefined;
+    return {
+      sourceId: chunk.source_id,
+      path: source.path,
+      startLine: chunk.location.startLine,
+      endLine: chunk.location.endLine,
+    };
+  }
+
+  async replaceBySource(sourceId: string, chunks: readonly MarkdownChunk[]): Promise<void> {
+    if (!this.sources.getById(sourceId) ||
+        !chunks.every((chunk) => validChunk(chunk) && chunk.source_id === sourceId) ||
+        new Set(chunks.map((chunk) => chunk.chunk_id)).size !== chunks.length) {
+      throw new Error('Valid chunks for a registered source are required.');
+    }
+    const retained = this.chunks.filter((chunk) => chunk.source_id !== sourceId);
+    if (chunks.some((chunk) => retained.some((item) => item.chunk_id === chunk.chunk_id))) {
+      throw new Error('Chunk ID already belongs to another source.');
+    }
+    const current = this.chunks.filter((chunk) => chunk.source_id === sourceId);
+    if (JSON.stringify(current) === JSON.stringify(chunks)) return;
+    const next = [...retained.map(copy), ...chunks.map(copy)];
+    await this.commit(next);
+  }
+
   private async commit(next: MarkdownChunk[]): Promise<void> {
     await this.storage.save(next);
     this.chunks = next;

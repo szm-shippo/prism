@@ -20,13 +20,17 @@ Vault Markdown が知識の正本である。検索用データは Vault から�
 
 Vault の Markdown 作成イベントは `src/obsidian/source-events.ts` で順に処理する。Obsidian は Vault 読み込み時にも既存ファイルの作成イベントを発行するため、登録済みパスは再登録しない。読み込みや保存に失敗した場合は次のイベント処理を止めず、プラグインからエラーを通知する。
 
-Markdown 更新イベントでは現在の内容の SHA-256 と Registry の値を比較する。内容が同じでも mtime またはサイズが変わればメタデータを更新し、変更判定結果を後続処理へ返せるようにする。Chunk の更新はここでは行わない。
+Markdown 更新イベントでは現在の内容の SHA-256 と Registry の値を比較する。内容が同じでも mtime またはサイズが変わればメタデータを更新し、変更判定結果を返す。続いて対象 Source の Chunk を同期する。
 
 Markdown のファイル名変更・移動はパスだけを更新し、source ID と内容ハッシュを維持する。フォルダ移動では配下の Markdown パスを一度に更新する。拡張子が Markdown に変わったファイルは新規登録し、Markdown から外れたファイルは Registry から除く。
 
-Markdown の削除イベントでは対応する Registry レコードを除き、削除した source ID を返す。フォルダ削除では配下の source ID をまとめて返す。Chunk や検索インデックスの削除は後続のパイプラインで行う。
+Markdown の削除イベントでは対象 Source の Chunk を除いてから Registry レコードを除く。フォルダ削除では配下の Source に同じ処理を行う。検索インデックスの削除は後続のパイプラインで行う。
 
-`src/core/index/chunk-registry.ts` は Chunker の出力を ID と source ID で保持する。登録時に Source Registry の source ID を確認し、source ごとの列挙と一括削除を提供する。レコードはプラグイン保存データ内に置き、Vault Markdown から再生成できる派生データとして扱う。Source の削除と Chunk の削除を連動させる処理は後続 Issue の範囲とする。
+`src/core/index/chunk-registry.ts` は Chunker の出力を ID と source ID で保持する。登録時に Source Registry の source ID を確認し、source ごとの列挙・置換・一括削除を提供する。レコードはプラグイン保存データ内に置き、Vault Markdown から再生成できる派生データとして扱う。`chunk-pipeline.ts` が作成・更新時に対象 Source の Markdown から Chunk を再生成する。保存失敗時は既存 Chunk をメモリ上で保持し、同じイベントを再処理できる。出典パスは Chunk に複写せず Source Registry から解決するため、移動後も Chunk ID と Source ID を維持する。
+
+## 検索ストア境界
+
+`full-text-search.ts` は Chunk の登録・更新・Source 単位の削除・検索・全消去を定義する。`vector-store.ts` は Vector の登録・更新・Chunk または Source 単位の削除・検索・全消去を定義する。Vector の値は既知のモデル次元数に一致する有限数列として検証する。具体的なストアと検索スコアは後続 Issue で決める。
 
 ## Markdown Chunker
 
