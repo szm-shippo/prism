@@ -73,3 +73,12 @@ test('scanner paths can be registered as Vault-relative Markdown sources', async
   for (const path of paths) await registry.create(source(path));
   assert.deepEqual(registry.list().map((record) => record.path), paths);
 });
+
+test('folder move rejects destination collisions without changing saved records', async () => {
+  const registry = await SourceRegistry.open(storage());
+  await registry.create(source('Old/one.md'));
+  await registry.create(source('New/one.md'));
+  const before = registry.list();
+  await assert.rejects(registry.movePaths('Old', 'New'), /already exists/);
+  assert.deepEqual(registry.list(), before);
+});
