@@ -1,8 +1,11 @@
+import { parseExcludedPaths } from './core/index/exclusion-rules';
+
 export interface PluginSettings {
   showVaultNotice: boolean;
   allowRemoteEmbeddingIndexing: boolean;
   embeddingModel: string;
   llmModel: string;
+  excludedPaths: string[];
 }
 
 const DEFAULT_SETTINGS: PluginSettings = {
@@ -10,6 +13,7 @@ const DEFAULT_SETTINGS: PluginSettings = {
   allowRemoteEmbeddingIndexing: false,
   embeddingModel: '',
   llmModel: '',
+  excludedPaths: [],
 };
 
 export function loadSettings(data: unknown): PluginSettings {
@@ -18,6 +22,11 @@ export function loadSettings(data: unknown): PluginSettings {
   }
 
   const saved = data as Record<string, unknown>;
+  if (saved.excludedPaths !== undefined &&
+      (!Array.isArray(saved.excludedPaths) || !saved.excludedPaths.every((path) => typeof path === 'string'))) {
+    throw new Error('Saved index exclusions are invalid.');
+  }
+  const excludedPaths = parseExcludedPaths((saved.excludedPaths as string[] | undefined ?? []).join('\n'));
   return {
     showVaultNotice: typeof saved.showVaultNotice === 'boolean'
       ? saved.showVaultNotice
@@ -25,5 +34,6 @@ export function loadSettings(data: unknown): PluginSettings {
     allowRemoteEmbeddingIndexing: saved.allowRemoteEmbeddingIndexing === true,
     embeddingModel: typeof saved.embeddingModel === 'string' ? saved.embeddingModel : DEFAULT_SETTINGS.embeddingModel,
     llmModel: typeof saved.llmModel === 'string' ? saved.llmModel : DEFAULT_SETTINGS.llmModel,
+    excludedPaths,
   };
 }

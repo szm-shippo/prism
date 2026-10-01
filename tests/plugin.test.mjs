@@ -82,6 +82,17 @@ async function loadPlugin(savedData, failSave = false, storedSecrets = new Map()
       this.text = text;
       return this;
     }
+    addTextArea(callback) {
+      const text = {
+        value: '',
+        setPlaceholder(value) { this.placeholder = value; return this; },
+        setValue(value) { this.value = value; return this; },
+        getValue() { return this.value; },
+      };
+      callback(text);
+      this.textArea = text;
+      return this;
+    }
     addButton(callback) {
       const button = {
         setButtonText(value) { this.label = value; return this; },
@@ -190,6 +201,96 @@ test('query uses a consented vector index and discloses the query embedding requ
   tabs[0].display();
   assert.match(tabs[0].containerEl.children.find((child) => child.text?.startsWith('Remote processing')).text,
     /query for vector search/);
+});
+
+test('Advanced exclusion rules remove indexed data and block create, rebuild, and retrieval', async () => {
+  const { plugin, listeners, MockTFile, tabs, requests, writes, notices } = await loadPlugin(null);
+  const privateFile = new MockTFile('Private/secret.md', '# Confidential material');
+  const publicFile = new MockTFile('public.md', '# Public material');
+  plugin.app.vault.files = [privateFile, publicFile];
+  await listeners.get('create')(privateFile);
+  await listeners.get('create')(publicFile);
+  const privateId = plugin.sourceRegistry.getByPath(privateFile.path).source_id;
+  tabs[0].display();
+  const setting = tabs[0].containerEl.children.find((child) => child.name === 'Excluded paths');
+  setting.textArea.setValue('Private/');
+  await setting.button.click();
+  assert.deepEqual(structuredClone(plugin.settings.excludedPaths), ['Private']);
+  assert.equal(plugin.sourceRegistry.getByPath(privateFile.path), undefined);
+  assert.equal(plugin.chunkRegistry.listBySource(privateId).length, 0);
+  assert.equal((await plugin.fullTextSearch.search('Confidential', 5)).length, 0);
+  assert.equal((await plugin.fullTextSearch.search('Public', 5)).length, 1);
+  await listeners.get('create')(privateFile);
+  await listeners.get('modify')(privateFile);
+  await plugin.rebuildIndex();
+  assert.equal(plugin.sourceRegistry.getByPath(privateFile.path), undefined);
+  assert.equal(plugin.sourceRegistry.list().length, 1);
+  assert.equal((await plugin.answerQuery('Confidential')).citations.length, 0);
+  assert.equal(requests.length, 0);
+  assert.equal(privateFile.content, '# Confidential material');
+  assert.match(notices.at(-1), /exclusions applied/);
+  const restarted = await loadPlugin(writes.at(-1));
+  assert.deepEqual(structuredClone(restarted.plugin.settings.excludedPaths), ['Private']);
+  await assert.rejects(plugin.setExcludedPaths('../outside.md'), /Vault-relative/);
+  assert.deepEqual(structuredClone(plugin.settings.excludedPaths), ['Private']);
+});
+
+test('excluded Markdown is never sent for remote embedding and existing vectors are removed', async () => {
+  const { plugin, listeners, MockTFile, requests } = await loadPlugin(null);
+  await plugin.setEmbeddingModel('embedding-model');
+  plugin.setEmbeddingApiKey('test-key');
+  await plugin.setAllowRemoteEmbeddingIndexing(true);
+  await plugin.setExcludedPaths('Private/');
+  const privateFile = new MockTFile('Private/secret.md', '# Secret');
+  await listeners.get('create')(privateFile);
+  assert.equal(requests.length, 0);
+  const publicFile = new MockTFile('public.md', '# Public');
+  await listeners.get('create')(publicFile);
+  assert.equal(requests.length, 1);
+  const publicId = plugin.sourceRegistry.getByPath('public.md').source_id;
+  assert.equal(plugin.vectorStore.listBySource(publicId).length, 1);
+  await plugin.setExcludedPaths('Private/\npublic.md');
+  assert.equal(plugin.vectorStore.listBySource(publicId).length, 0);
+  assert.equal(plugin.sourceRegistry.getByPath('public.md'), undefined);
+  assert.equal(requests.length, 1);
+});
+
+test('moving files and folders across exclusion rules updates indexed sources', async () => {
+  const { plugin, listeners, MockTFile } = await loadPlugin(null);
+  await plugin.setExcludedPaths('Private/');
+  const file = new MockTFile('Public/note.md', '# Movable');
+  plugin.app.vault.files = [file];
+  await listeners.get('create')(file);
+  const originalId = plugin.sourceRegistry.getByPath('Public/note.md').source_id;
+  file.path = 'Private/note.md';
+  await listeners.get('rename')(file, 'Public/note.md');
+  assert.equal(plugin.sourceRegistry.getById(originalId), undefined);
+  assert.equal((await plugin.fullTextSearch.search('Movable', 5)).length, 0);
+  file.path = 'Public/note.md';
+  await listeners.get('rename')(file, 'Private/note.md');
+  assert.ok(plugin.sourceRegistry.getByPath('Public/note.md'));
+  file.path = 'Private/note.md';
+  await listeners.get('rename')({ path: 'Private' }, 'Public');
+  assert.equal(plugin.sourceRegistry.getByPath('Private/note.md'), undefined);
+  file.path = 'Public/note.md';
+  await listeners.get('rename')({ path: 'Public' }, 'Private');
+  assert.ok(plugin.sourceRegistry.getByPath('Public/note.md'));
+});
+
+test('failed exclusion cleanup still keeps the source out of RAG requests until retry', async () => {
+  const { plugin, listeners, MockTFile, requests } = await loadPlugin(null);
+  const file = new MockTFile('Private/secret.md', '# Confidential');
+  plugin.app.vault.files = [file];
+  await listeners.get('create')(file);
+  const remove = plugin.fullTextSearch.deleteBySource.bind(plugin.fullTextSearch);
+  plugin.fullTextSearch.deleteBySource = async () => { throw new Error('storage failed'); };
+  await assert.rejects(plugin.setExcludedPaths('Private/'), /storage failed/);
+  assert.equal((await plugin.fullTextSearch.search('Confidential', 5)).length, 1);
+  assert.equal((await plugin.answerQuery('Confidential')).citations.length, 0);
+  assert.equal(requests.length, 0);
+  plugin.fullTextSearch.deleteBySource = remove;
+  await plugin.setExcludedPaths('Private/');
+  assert.equal((await plugin.fullTextSearch.search('Confidential', 5)).length, 0);
 });
 
 test('Vault create event updates the local full-text index without embedding credentials', async () => {
@@ -411,6 +512,7 @@ test('invalid saved settings fall back to the default', async () => {
     assert.equal(plugin.settings.showVaultNotice, true);
     assert.equal(plugin.settings.allowRemoteEmbeddingIndexing, false);
   }
+  await assert.rejects(loadPlugin({ excludedPaths: ['../outside.md'] }), /Vault-relative/);
 });
 
 test('failed save keeps the previous setting and reports the error', async () => {

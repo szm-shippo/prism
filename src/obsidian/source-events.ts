@@ -11,10 +11,15 @@ export class SourceEventHandler {
     private readonly registry: SourceRegistry,
     private readonly chunks?: ChunkPipeline,
     private readonly indexes?: Pick<IndexUpdateOrchestrator, 'sync' | 'delete'> & { clear(): Promise<void> },
+    private readonly isExcluded: (path: string) => boolean = () => false,
   ) {}
 
   create(file: TAbstractFile): Promise<void> {
     return this.enqueue(() => this.indexFile(file));
+  }
+
+  removeExcluded(): Promise<void> {
+    return this.enqueue(() => this.removeExcludedSources());
   }
 
   rebuild(): Promise<void> {
@@ -33,6 +38,10 @@ export class SourceEventHandler {
       if (!(file instanceof TFile) || file.extension !== 'md') return undefined;
       const existing = this.registry.getByPath(file.path);
       if (!existing) return undefined;
+      if (this.isExcluded(file.path)) {
+        await this.removeSource(existing.source_id);
+        return undefined;
+      }
       const content = await this.vault.read(file);
       const contentChanged = await hashSourceContent(content) !== existing.content_hash;
       if (contentChanged || file.stat.mtime !== existing.mtime || file.stat.size !== existing.size) {
@@ -53,12 +62,13 @@ export class SourceEventHandler {
     return this.enqueue(async () => {
       if (file instanceof TFile) {
         const existing = this.registry.getByPath(oldPath);
+        if (this.isExcluded(file.path)) {
+          const source = existing ?? this.registry.getByPath(file.path);
+          if (source) await this.removeSource(source.source_id);
+          return source ? [source.source_id] : [];
+        }
         if (file.extension !== 'md') {
-          if (existing) {
-            await this.indexes?.delete(existing.source_id);
-            await this.chunks?.delete(existing.source_id);
-            await this.registry.delete(existing.source_id);
-          }
+          if (existing) await this.removeSource(existing.source_id);
           return existing ? [existing.source_id] : [];
         }
         if (!existing) {
@@ -78,7 +88,15 @@ export class SourceEventHandler {
           return [created.source_id];
         }
       }
-      return this.registry.movePaths(oldPath, file.path);
+      const moved = await this.registry.movePaths(oldPath, file.path);
+      await this.removeExcludedSources();
+      if (!(file instanceof TFile)) {
+        for (const candidate of this.vault.getMarkdownFiles()) {
+          if ((candidate.path === file.path || candidate.path.startsWith(`${file.path}/`)) &&
+              !this.registry.getByPath(candidate.path)) await this.indexFile(candidate);
+        }
+      }
+      return moved;
     });
   }
 
@@ -103,6 +121,11 @@ export class SourceEventHandler {
 
   private async indexFile(file: TAbstractFile): Promise<void> {
     if (!(file instanceof TFile) || file.extension !== 'md') return;
+    if (this.isExcluded(file.path)) {
+      const existing = this.registry.getByPath(file.path);
+      if (existing) await this.removeSource(existing.source_id);
+      return;
+    }
     const content = await this.vault.read(file);
     const source = this.registry.getByPath(file.path) ?? await this.registry.create({
       path: file.path,
@@ -112,5 +135,17 @@ export class SourceEventHandler {
     });
     await this.chunks?.sync(source.source_id, content);
     await this.indexes?.sync(source.source_id);
+  }
+
+  private async removeExcludedSources(): Promise<void> {
+    for (const source of this.registry.list()) {
+      if (this.isExcluded(source.path)) await this.removeSource(source.source_id);
+    }
+  }
+
+  private async removeSource(sourceId: string): Promise<void> {
+    await this.indexes?.delete(sourceId);
+    await this.chunks?.delete(sourceId);
+    await this.registry.delete(sourceId);
   }
 }
