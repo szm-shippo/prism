@@ -1,18 +1,35 @@
 import { Notice, Plugin, PluginSettingTab, Setting } from 'obsidian';
+import { SourceRegistry, type SourceRecord } from '../core/index/source-registry';
 import { loadSettings, type PluginSettings } from '../settings';
 
 export default class PrismPlugin extends Plugin {
   settings: PluginSettings = loadSettings(null);
+  sourceRegistry?: SourceRegistry;
+  private savedData: Record<string, unknown> = {};
 
   async onload(): Promise<void> {
-    this.settings = loadSettings(await this.loadData());
+    const loaded = await this.loadData();
+    this.savedData = typeof loaded === 'object' && loaded !== null && !Array.isArray(loaded)
+      ? loaded as Record<string, unknown> : {};
+    this.settings = loadSettings(this.savedData);
+    this.sourceRegistry = await SourceRegistry.open({
+      load: async () => this.savedData.sourceRegistry,
+      save: async (records: readonly SourceRecord[]) => {
+        await this.savePluginData({ sourceRegistry: records });
+      },
+    });
     this.addSettingTab(new PrismSettingTab(this));
   }
 
   async setShowVaultNotice(value: boolean): Promise<void> {
-    const updated = { ...this.settings, showVaultNotice: value };
+    await this.savePluginData({ showVaultNotice: value });
+    this.settings = { ...this.settings, showVaultNotice: value };
+  }
+
+  private async savePluginData(changes: Record<string, unknown>): Promise<void> {
+    const updated = { ...this.savedData, ...changes };
     await this.saveData(updated);
-    this.settings = updated;
+    this.savedData = updated;
   }
 }
 

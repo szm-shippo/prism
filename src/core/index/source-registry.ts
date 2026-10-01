@@ -1,0 +1,126 @@
+export interface SourceRecord {
+  source_id: string;
+  path: string;
+  content_hash: string;
+  mtime: number;
+  size: number;
+}
+
+export interface SourceRegistryStorage {
+  load(): Promise<unknown>;
+  save(records: readonly SourceRecord[]): Promise<void>;
+}
+
+interface SourceInput {
+  path: string;
+  content: string;
+  mtime: number;
+  size: number;
+}
+
+function validPath(path: string): boolean {
+  return path.endsWith('.md') && !path.startsWith('/') &&
+    !path.split('/').some((part) => part === '' || part === '.' || part === '..' || part.includes('\\'));
+}
+
+function validateInput(input: SourceInput): void {
+  if (!validPath(input.path)) throw new Error('A Vault-relative Markdown path is required.');
+  if (!Number.isFinite(input.mtime) || input.mtime < 0 ||
+      !Number.isSafeInteger(input.size) || input.size < 0) {
+    throw new Error('Valid source mtime and size are required.');
+  }
+}
+
+async function contentHash(content: string): Promise<string> {
+  const bytes = new TextEncoder().encode(content);
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+function isSourceRecord(value: unknown): value is SourceRecord {
+  if (typeof value !== 'object' || value === null) return false;
+  const record = value as Record<string, unknown>;
+  return typeof record.source_id === 'string' && record.source_id.length > 0 &&
+    typeof record.path === 'string' && validPath(record.path) &&
+    typeof record.content_hash === 'string' && /^[a-f0-9]{64}$/.test(record.content_hash) &&
+    typeof record.mtime === 'number' && Number.isFinite(record.mtime) && record.mtime >= 0 &&
+    typeof record.size === 'number' && Number.isSafeInteger(record.size) && record.size >= 0;
+}
+
+export class SourceRegistry {
+  private constructor(
+    private readonly storage: SourceRegistryStorage,
+    private records: SourceRecord[],
+  ) {}
+
+  static async open(storage: SourceRegistryStorage): Promise<SourceRegistry> {
+    const loaded = await storage.load();
+    if (loaded === undefined || loaded === null) return new SourceRegistry(storage, []);
+    if (!Array.isArray(loaded) || !loaded.every(isSourceRecord) ||
+        new Set(loaded.map((record) => record.source_id)).size !== loaded.length ||
+        new Set(loaded.map((record) => record.path)).size !== loaded.length) {
+      throw new Error('Source Registry data is invalid; rebuild it from Vault Markdown.');
+    }
+    return new SourceRegistry(storage, loaded.map((record) => ({ ...record })));
+  }
+
+  list(): SourceRecord[] {
+    return this.records.map((record) => ({ ...record }));
+  }
+
+  getById(sourceId: string): SourceRecord | undefined {
+    const record = this.records.find((item) => item.source_id === sourceId);
+    return record && { ...record };
+  }
+
+  getByPath(path: string): SourceRecord | undefined {
+    const record = this.records.find((item) => item.path === path);
+    return record && { ...record };
+  }
+
+  async create(input: SourceInput): Promise<SourceRecord> {
+    validateInput(input);
+    if (this.getByPath(input.path)) throw new Error('Source path already exists in the registry.');
+    const record: SourceRecord = {
+      source_id: crypto.randomUUID(),
+      path: input.path,
+      content_hash: await contentHash(input.content),
+      mtime: input.mtime,
+      size: input.size,
+    };
+    await this.commit([...this.records, record]);
+    return { ...record };
+  }
+
+  async update(sourceId: string, input: SourceInput): Promise<SourceRecord> {
+    validateInput(input);
+    const index = this.records.findIndex((record) => record.source_id === sourceId);
+    if (index < 0) throw new Error('Source ID was not found in the registry.');
+    if (this.records.some((record) => record.path === input.path && record.source_id !== sourceId)) {
+      throw new Error('Source path already exists in the registry.');
+    }
+    const record = {
+      source_id: sourceId,
+      path: input.path,
+      content_hash: await contentHash(input.content),
+      mtime: input.mtime,
+      size: input.size,
+    };
+    const next = [...this.records];
+    next[index] = record;
+    await this.commit(next);
+    return { ...record };
+  }
+
+  async delete(sourceId: string): Promise<boolean> {
+    const next = this.records.filter((record) => record.source_id !== sourceId);
+    if (next.length === this.records.length) return false;
+    await this.commit(next);
+    return true;
+  }
+
+  private async commit(next: SourceRecord[]): Promise<void> {
+    await this.storage.save(next);
+    this.records = next;
+  }
+}
