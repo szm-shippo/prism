@@ -33,3 +33,30 @@ test('chunker omits empty input and requires a source ID', () => {
   assert.deepEqual(chunkMarkdown('source-1', ' \n\n '), []);
   assert.throws(() => chunkMarkdown('', '# Heading'), /source ID/);
 });
+
+test('heading-only documents retain each heading and its original line', () => {
+  const chunks = chunkMarkdown('source-1', '# First\n\n## Second\n### Third\n');
+  assert.deepEqual(chunks.map(({ content, location }) => ({ content, location })), [
+    { content: '# First', location: { startLine: 1, endLine: 1 } },
+    { content: '## Second', location: { startLine: 3, endLine: 3 } },
+    { content: '### Third', location: { startLine: 4, endLine: 4 } },
+  ]);
+});
+
+test('long documents preserve all content without introducing length-based splits', () => {
+  const body = Array.from({ length: 10_000 }, (_, index) => `Line ${index + 1}`).join('\n');
+  const chunks = chunkMarkdown('source-1', `# Long\n${body}`);
+  assert.equal(chunks.length, 1);
+  assert.equal(chunks[0].location.endLine, 10_001);
+  assert.equal(chunks[0].content, `# Long\n${body}`);
+});
+
+test('Japanese Markdown retains Unicode text, headings, and stable hashes', () => {
+  const markdown = '# 概要\r\n本文には日本語と絵文字📝が含まれる。\r\n## 詳細\r\n説明。';
+  const chunks = chunkMarkdown('日本語のsource', markdown);
+  assert.deepEqual(chunks.map(({ content, location }) => ({ content, location })), [
+    { content: '# 概要\n本文には日本語と絵文字📝が含まれる。', location: { startLine: 1, endLine: 2 } },
+    { content: '## 詳細\n説明。', location: { startLine: 3, endLine: 4 } },
+  ]);
+  assert.deepEqual(chunkMarkdown('日本語のsource', markdown), chunks);
+});
