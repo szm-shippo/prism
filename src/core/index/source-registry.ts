@@ -31,7 +31,7 @@ function validateInput(input: SourceInput): void {
   }
 }
 
-async function contentHash(content: string): Promise<string> {
+export async function hashSourceContent(content: string): Promise<string> {
   const bytes = new TextEncoder().encode(content);
   const digest = await crypto.subtle.digest('SHA-256', bytes);
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
@@ -84,7 +84,7 @@ export class SourceRegistry {
     const record: SourceRecord = {
       source_id: crypto.randomUUID(),
       path: input.path,
-      content_hash: await contentHash(input.content),
+      content_hash: await hashSourceContent(input.content),
       mtime: input.mtime,
       size: input.size,
     };
@@ -102,7 +102,7 @@ export class SourceRegistry {
     const record = {
       source_id: sourceId,
       path: input.path,
-      content_hash: await contentHash(input.content),
+      content_hash: await hashSourceContent(input.content),
       mtime: input.mtime,
       size: input.size,
     };
