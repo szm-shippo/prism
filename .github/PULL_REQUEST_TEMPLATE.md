@@ -4,7 +4,7 @@
 
 ## 関連 Issue
 
-<!-- 完全に解決する場合は Closes #番号、それ以外は Refs #番号 -->
+<!-- 完全に解決する Issue はそれぞれ Closes #番号、それ以外は Refs #番号。wave PR では完了した親 Issue と各 sub-issue を個別に列挙する -->
 
 ## 変更内容
 
