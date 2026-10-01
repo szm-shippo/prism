@@ -38,7 +38,7 @@ Markdown の削除イベントでは対象 Source の Chunk を除いてから R
 
 `hybrid-retrieval.ts` はテキストとクエリ Vector を受け取り、全文検索と Vector 検索を呼び出す。同じ Chunk ID は一件にまとめ、各検索結果の順位の逆数を加算して候補を並べる。両ストアのスコア尺度に依存せず、同じ Chunk ID に異なる Source ID が付いていれば再構築を要する不整合として拒否する。最終的な再順位付けは後続 Issue で行う。
 
-Vault の作成・変更・削除イベントは Chunk Registry の更新後にローカル全文検索へ反映する。`index-update-orchestrator.ts` は同じ Source の Chunk を EmbeddingProvider、全文検索、VectorStore に反映する契約を実装し、Embedding を検証してから検索ストアを書き換える。再実行時はその Source の旧エントリを削除してから登録するため、途中の保存失敗後にも再同期できる。リモート Embedding を Vault イベントへ自動接続するには、Vault 内容を外部へ送ることへの明示的な同意が必要である。
+Vault の作成・変更・削除イベントは Chunk Registry の更新後にローカル全文検索へ反映する。設定画面の「Send changed chunks to OpenAI for search indexing」は既定でオフにし、利用者がオンにした後の Vault イベントだけで、EmbeddingProvider を通じて `https://api.openai.com/v1/embeddings` に Chunk 本文を送る。オンにしただけでは既存 Note を送らない。オフの間も全文検索は更新し、変更・削除された Source の古い Vector を除く。`index-update-orchestrator.ts` は保存済み Vector の Chunk ID と内容ハッシュを比較し、新規・変更 Chunk のみを送信する。失敗時は現在の全文検索を保ち、古い Vector を残さず、次のイベントで再試行できる。Embedding モデルの変更時は、異なるモデルの Vector を混在させないため、派生 Vector インデックスを消去する。
 
 ## Markdown Chunker
 

@@ -78,6 +78,17 @@ test('failed persistence leaves the previous vector state available', async () =
   assert.equal((await (await LocalVectorStore.open(backing, 2)).search([1, 0], 1))[0].score, 1);
 });
 
+test('persisted content hashes remain available for incremental updates', async () => {
+  const backing = storage();
+  const vectors = await LocalVectorStore.open(backing, 2);
+  await vectors.put([{ ...entry('a', 'one', [1, 0]), contentHash: 'content-hash' }]);
+  const reopened = await LocalVectorStore.open(backing, 2);
+  const [saved] = reopened.listBySource('one');
+  assert.equal(saved.contentHash, 'content-hash');
+  saved.values[0] = 99;
+  assert.equal(reopened.listBySource('one')[0].values[0], 1);
+});
+
 test('store accepts vectors returned by the remote embedding provider contract', async () => {
   const { outputFiles: providerFiles } = await build({
     entryPoints: [fileURLToPath(new URL('../src/obsidian/openai-embedding-provider.ts', import.meta.url))],

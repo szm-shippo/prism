@@ -2,6 +2,7 @@ export interface VectorEntry {
   chunkId: string;
   sourceId: string;
   values: readonly number[];
+  contentHash?: string;
 }
 
 export interface VectorHit {
@@ -17,6 +18,7 @@ export interface VectorStore {
   update(entries: readonly VectorEntry[]): Promise<void>;
   delete(chunkId: string): Promise<void>;
   deleteBySource(sourceId: string): Promise<void>;
+  listBySource(sourceId: string): VectorEntry[];
   search(query: readonly number[], limit: number): Promise<VectorHit[]>;
   clear(): Promise<void>;
 }

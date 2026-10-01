@@ -21,6 +21,9 @@ function validEntry(value: unknown, dimensions: number): value is VectorEntry {
   const entry = value as Record<string, unknown>;
   if (typeof entry.chunkId !== 'string' || entry.chunkId.length === 0 ||
       typeof entry.sourceId !== 'string' || entry.sourceId.length === 0 || !Array.isArray(entry.values)) return false;
+  if (entry.contentHash !== undefined && (typeof entry.contentHash !== 'string' || entry.contentHash.length === 0)) {
+    return false;
+  }
   try {
     validateVectorDimensions(entry.values, dimensions);
     const magnitude = norm(entry.values);
@@ -31,7 +34,12 @@ function validEntry(value: unknown, dimensions: number): value is VectorEntry {
 }
 
 function copy(entry: VectorEntry): VectorEntry {
-  return { chunkId: entry.chunkId, sourceId: entry.sourceId, values: [...entry.values] };
+  return {
+    chunkId: entry.chunkId,
+    sourceId: entry.sourceId,
+    values: [...entry.values],
+    ...(entry.contentHash === undefined ? {} : { contentHash: entry.contentHash }),
+  };
 }
 
 export class LocalVectorStore implements VectorStore {
@@ -88,6 +96,10 @@ export class LocalVectorStore implements VectorStore {
   async deleteBySource(sourceId: string): Promise<void> {
     const next = this.entries.filter((entry) => entry.sourceId !== sourceId);
     if (next.length !== this.entries.length) await this.commit(next);
+  }
+
+  listBySource(sourceId: string): VectorEntry[] {
+    return this.entries.filter((entry) => entry.sourceId === sourceId).map(copy);
   }
 
   async search(query: readonly number[], limit: number): Promise<VectorHit[]> {

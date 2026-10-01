@@ -59,15 +59,16 @@ test('source create and modify synchronize both indexes without touching another
   assert.equal((await vectors.search([0, 1], 5)).length, 1);
 });
 
-test('embedding failure does not replace existing indexes and retry repairs them', async () => {
+test('embedding failure keeps current text searchable, removes stale vectors and retry repairs them', async () => {
   const { first, chunks, fullText, vectors, embeddings, updates } = await fixture();
   await chunks.put(chunkMarkdown(first.source_id, '# First'));
   await updates.sync(first.source_id);
   await chunks.replaceBySource(first.source_id, chunkMarkdown(first.source_id, '# Updated'));
   embeddings.embedBatch = async () => { throw new Error('provider unavailable'); };
   await assert.rejects(updates.sync(first.source_id), /provider unavailable/);
-  assert.equal((await fullText.search('First', 5)).length, 1);
-  assert.equal((await vectors.search([1, 0], 5)).length, 1);
+  assert.deepEqual(await fullText.search('First', 5), []);
+  assert.equal((await fullText.search('Updated', 5)).length, 1);
+  assert.deepEqual(await vectors.search([1, 0], 5), []);
   embeddings.embedBatch = async () => [[1, 0]];
   await updates.sync(first.source_id);
   assert.deepEqual(await fullText.search('First', 5), []);
@@ -83,4 +84,24 @@ test('empty source removes old index records without requesting embeddings', asy
   await updates.sync(first.source_id);
   assert.deepEqual(await fullText.search('First', 5), []);
   assert.deepEqual(await vectors.search([1, 0], 5), []);
+});
+
+test('editing one chunk embeds only that chunk and leaves another source untouched', async () => {
+  const { first, second, chunks, vectors, embeddings, updates } = await fixture();
+  const sent = [];
+  embeddings.embedBatch = async (texts) => {
+    sent.push([...texts]);
+    return texts.map(() => [1, 0]);
+  };
+  await chunks.put([...chunkMarkdown(first.source_id, '# First\n## Detail\nBody'),
+    ...chunkMarkdown(second.source_id, '# Second')]);
+  await updates.sync(first.source_id);
+  await updates.sync(second.source_id);
+  await chunks.replaceBySource(first.source_id, chunkMarkdown(first.source_id, '# First\n## Detail\nChanged'));
+  await updates.sync(first.source_id);
+  assert.deepEqual(sent.at(-1), ['## Detail\nChanged']);
+  assert.equal(vectors.listBySource(first.source_id).length, 2);
+  assert.equal(vectors.listBySource(second.source_id).length, 1);
+  await updates.sync(first.source_id);
+  assert.equal(sent.length, 3);
 });

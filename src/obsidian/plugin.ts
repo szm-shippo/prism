@@ -2,8 +2,11 @@ import { Notice, Plugin, PluginSettingTab, Setting } from 'obsidian';
 import { SourceRegistry, type SourceRecord } from '../core/index/source-registry';
 import { ChunkRegistry } from '../core/index/chunk-registry';
 import { ChunkPipeline } from '../core/index/chunk-pipeline';
+import { IndexUpdateOrchestrator } from '../core/index/index-update-orchestrator';
 import { LocalFullTextSearch } from '../core/index/local-full-text-search';
+import { LocalVectorStore, type VectorStoreState } from '../core/index/local-vector-store';
 import { SourceEventHandler } from './source-events';
+import { OpenAIEmbeddingProvider } from './openai-embedding-provider';
 import { loadSettings, type PluginSettings } from '../settings';
 
 export default class PrismPlugin extends Plugin {
@@ -11,6 +14,7 @@ export default class PrismPlugin extends Plugin {
   sourceRegistry?: SourceRegistry;
   chunkRegistry?: ChunkRegistry;
   fullTextSearch?: LocalFullTextSearch;
+  vectorStore?: LocalVectorStore;
   private savedData: Record<string, unknown> = {};
   private dataWrite: Promise<void> = Promise.resolve();
 
@@ -39,23 +43,72 @@ export default class PrismPlugin extends Plugin {
     });
     const fullText = this.fullTextSearch;
     const chunks = this.chunkRegistry;
-    const indexUpdates = {
+    const vectorStorage = {
+      load: async () => this.savedData.vectorIndex,
+      save: async (state: VectorStoreState) => {
+        await this.savePluginData({ vectorIndex: state, vectorIndexModel: this.settings.embeddingModel });
+      },
+    };
+    const getVectorStore = async (dimensions?: number): Promise<LocalVectorStore | undefined> => {
+      const saved = this.savedData.vectorIndex as { dimensions?: unknown } | null | undefined;
+      const target = dimensions ?? saved?.dimensions;
+      if (target === undefined) return undefined;
+      if (typeof target !== 'number') throw new Error('Vector index dimensions are invalid.');
+      if (dimensions !== undefined && typeof this.savedData.vectorIndexModel === 'string' &&
+          this.savedData.vectorIndexModel !== this.settings.embeddingModel) {
+        throw new Error('Embedding model changed; rebuild the vector index.');
+      }
+      if (!this.vectorStore || this.vectorStore.dimensions !== target) {
+        this.vectorStore = await LocalVectorStore.open(vectorStorage, target);
+      }
+      return this.vectorStore;
+    };
+    const remoteIndexes = new IndexUpdateOrchestrator(chunks, fullText, {
+      embedBatch: async (texts) => {
+        if (!this.settings.allowRemoteEmbeddingIndexing) {
+          throw new Error('Remote embedding indexing is not enabled.');
+        }
+        const key = this.app.secretStorage.getSecret('prism-embedding-api-key');
+        if (!key || !this.settings.embeddingModel.trim()) {
+          throw new Error('Configure an embedding model and API key before remote indexing.');
+        }
+        if (typeof this.savedData.vectorIndexModel === 'string' &&
+            this.savedData.vectorIndexModel !== this.settings.embeddingModel) {
+          throw new Error('Embedding model changed; rebuild the vector index.');
+        }
+        const model = this.settings.embeddingModel;
+        const vectors = await new OpenAIEmbeddingProvider(key, model).embedBatch(texts);
+        if (!this.settings.allowRemoteEmbeddingIndexing || this.settings.embeddingModel !== model) {
+          throw new Error('Embedding settings changed during indexing.');
+        }
+        return vectors;
+      },
+    }, getVectorStore);
+    const localIndexes = {
       sync: async (sourceId: string): Promise<void> => {
         const current = chunks.listBySource(sourceId);
         await fullText.deleteBySource(sourceId);
         await fullText.index(current);
       },
-      delete: async (sourceId: string): Promise<void> => {
-        await fullText.deleteBySource(sourceId);
+    };
+    const indexUpdates = {
+      sync: async (sourceId: string): Promise<void> => {
+        if (this.settings.allowRemoteEmbeddingIndexing) {
+          await remoteIndexes.sync(sourceId);
+        } else {
+          await localIndexes.sync(sourceId);
+          await (await getVectorStore())?.deleteBySource(sourceId);
+        }
       },
+      delete: (sourceId: string): Promise<void> => remoteIndexes.delete(sourceId),
     };
     const sourceEvents = new SourceEventHandler(this.app.vault, this.sourceRegistry,
       new ChunkPipeline(this.sourceRegistry, this.chunkRegistry), indexUpdates);
     this.registerEvent(this.app.vault.on('create', (file) => {
-      return sourceEvents.create(file).catch(() => new Notice('Prism could not register a Markdown source. Check plugin storage.'));
+      return sourceEvents.create(file).catch(() => new Notice('Prism could not index a Markdown source. Check embedding settings and plugin storage.'));
     }));
     this.registerEvent(this.app.vault.on('modify', (file) => {
-      return sourceEvents.modify(file).catch(() => new Notice('Prism could not update a Markdown source. Check plugin storage.'));
+      return sourceEvents.modify(file).catch(() => new Notice('Prism could not update search indexes. Check embedding settings and plugin storage.'));
     }));
     this.registerEvent(this.app.vault.on('rename', (file, oldPath) => {
       return sourceEvents.rename(file, oldPath).catch(() => new Notice('Prism could not move a Markdown source. Check plugin storage.'));
@@ -73,8 +126,16 @@ export default class PrismPlugin extends Plugin {
 
   async setEmbeddingModel(value: string): Promise<void> {
     const embeddingModel = value.trim();
-    await this.savePluginData({ embeddingModel });
+    if (embeddingModel !== this.settings.embeddingModel) {
+      await this.savePluginData({ embeddingModel, vectorIndex: null, vectorIndexModel: null });
+      this.vectorStore = undefined;
+    }
     this.settings = { ...this.settings, embeddingModel };
+  }
+
+  async setAllowRemoteEmbeddingIndexing(value: boolean): Promise<void> {
+    await this.savePluginData({ allowRemoteEmbeddingIndexing: value });
+    this.settings = { ...this.settings, allowRemoteEmbeddingIndexing: value };
   }
 
   async setLlmModel(value: string): Promise<void> {
@@ -143,6 +204,20 @@ class PrismSettingTab extends PluginSettingTab {
     containerEl.createEl('p', {
       text: 'Remote processing: OpenAI receives Markdown or chunk text for embeddings, and your query plus retrieved source IDs and text for answers. This data leaves your Vault for those requests.',
     });
+
+    new Setting(containerEl)
+      .setName('Send changed chunks to OpenAI for search indexing')
+      .setDesc('Off by default. When enabled, Prism sends new or changed Markdown chunks, including previously unindexed chunks in a changed note, to https://api.openai.com/v1/embeddings using your configured embedding model and API key. Local full-text indexing continues when off. Enabling does not send existing notes immediately.')
+      .addToggle((toggle) => toggle
+        .setValue(this.prism.settings.allowRemoteEmbeddingIndexing)
+        .onChange(async (value) => {
+          try {
+            await this.prism.setAllowRemoteEmbeddingIndexing(value);
+          } catch {
+            toggle.setValue(this.prism.settings.allowRemoteEmbeddingIndexing);
+            new Notice('Prism could not save remote indexing consent. Try again.');
+          }
+        }));
 
     new Setting(containerEl)
       .setName('Embedding model')
