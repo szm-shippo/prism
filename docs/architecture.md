@@ -31,3 +31,5 @@ Vault Markdown が知識の正本である。検索用データは Vault から�
 ## LLM Provider
 
 `src/core/provider/llm-provider.ts` は role 付きメッセージと出典 ID を持つ context をリクエストに分けて渡し、生成テキストを返す。逐次出力は任意の `stream` メソッドで表す。Provider 固有の失敗は `LLMProviderError` の共通コードに変換し、利用者向けメッセージには元の応答本文や認証情報を含めない。実際の通信とエラー変換は具体的な Provider 実装が担う。
+
+初期の具体実装は `src/obsidian/openai-llm-provider.ts` とし、Obsidian の `requestUrl` から OpenAI の `/v1/responses` へ、メッセージ、参照 context の source ID と本文、モデル ID を送る。context は信頼しない参照データとして最終ユーザーメッセージの前に置き、含まれる指示に従わないよう上位メッセージで指定する。応答の保存を要求しない `store: false` を使う。API キーとモデルは呼び出し側から渡し、設定 UI は Provider 設定 Issue で扱う。送信先は固定し、API の応答本文や通信例外をエラー表示に含めない。
