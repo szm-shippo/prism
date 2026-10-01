@@ -1,9 +1,13 @@
 export interface PluginSettings {
   showVaultNotice: boolean;
+  embeddingModel: string;
+  llmModel: string;
 }
 
 const DEFAULT_SETTINGS: PluginSettings = {
   showVaultNotice: true,
+  embeddingModel: '',
+  llmModel: '',
 };
 
 export function loadSettings(data: unknown): PluginSettings {
@@ -16,5 +20,7 @@ export function loadSettings(data: unknown): PluginSettings {
     showVaultNotice: typeof saved.showVaultNotice === 'boolean'
       ? saved.showVaultNotice
       : DEFAULT_SETTINGS.showVaultNotice,
+    embeddingModel: typeof saved.embeddingModel === 'string' ? saved.embeddingModel : DEFAULT_SETTINGS.embeddingModel,
+    llmModel: typeof saved.llmModel === 'string' ? saved.llmModel : DEFAULT_SETTINGS.llmModel,
   };
 }
