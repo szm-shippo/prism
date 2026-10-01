@@ -64,8 +64,14 @@ Provider 設定 UI はモデル ID をプラグイン設定データへ保存し
 
 ## Source Citation
 
-`CitationAnswerer` は検索で使った chunk ID と source ID を LLM context に渡し、回答中の `[cite:CHUNK_ID]` を出典に変換する。出典のパスと行範囲は回答生成後に Chunk Registry と Source Registry から取得する。入力にない chunk、source ID が一致しない chunk、Vault に存在しないパスの marker は出典として採用しない。戻り値は回答文と構造化された出典の組で、Markdown への遷移と RAG パイプラインへの接続は後続 Issue が担当する。
+`CitationAnswerer` は検索で使った chunk ID と source ID を LLM context に渡し、回答中の `[cite:CHUNK_ID]` を出典に変換する。出典のパスと行範囲は回答生成後に Chunk Registry と Source Registry から取得する。入力にない chunk、source ID が一致しない chunk、Vault に存在しないパスの marker は出典として採用しない。戻り値は回答文と構造化された出典の組である。引用元を開く際は citation に保存された古いパスを使わず、source ID から現在の Vault パスを調べる。Chat UI での遷移操作は後続 Issue が担当する。
+
+## RAG Pipeline
+
+`RagPipeline` は query のベクトル化、Hybrid Retrieval、rerank、context 構築、回答生成、出典付与を接続する。context は上位の完全な chunk を選び、JSON 化した UTF-8 バイト数を保守的な token 上限として使う。初期値は候補 20 件、context 最大 6 chunk、上限 6000 とし、ここでの実装値であって製品仕様の固定値ではない。ベクトル検索は同意済みの現行モデルのインデックスと認証情報が揃う場合だけ行い、それ以外はローカル全文検索を使う。回答に使う chunk の source は現在の Vault で存在を確認する。
 
 ## Index Controls
 
 設定画面の Advanced 領域は登録済み source と chunk の件数、再構築の状態を表示する。再構築は Vault Markdown から派生インデックスを作り直す既存の処理を呼び出し、失敗時は再試行できる。リモート embedding の同意が有効な場合に Markdown chunk が OpenAI に送信されることを操作位置に表示する。
+
+除外設定は Vault 相対のファイルまたはフォルダパスを 1 行ずつ受け付ける。フォルダ指定は配下にも適用し、比較は Vault パスと同じ大文字・小文字で行う。設定適用時に該当する source、chunk、全文・ベクトル索引を削除し、新規イベント、移動、再構築でも対象を読み込まない。削除が失敗して派生データが残っても、RAG の候補選択で除外し外部の回答処理へ渡さない。除外を解除した後は明示的な再構築で再登録する。

@@ -209,7 +209,10 @@ test('renaming a Markdown file preserves its source ID and updates the path', as
 
 test('renaming a folder moves all contained Markdown paths without changing IDs', async () => {
   const registry = await makeRegistry();
-  const handler = new SourceEventHandler({ read: async (file) => file.content }, registry);
+  const handler = new SourceEventHandler({
+    read: async (file) => file.content,
+    getMarkdownFiles: () => [],
+  }, registry);
   await handler.create(new TFile('Old/one.md', 'One'));
   await handler.create(new TFile('Old/Nested/two.md', 'Two'));
   const originalIds = registry.list().map((record) => record.source_id);
