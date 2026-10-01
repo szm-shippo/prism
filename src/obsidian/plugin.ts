@@ -1,13 +1,17 @@
 import { Notice, Plugin, PluginSettingTab, Setting, TFile } from 'obsidian';
-import type { SourceCitation } from '../core/application/citation-answerer';
+import { CitationAnswerer, type CitedAnswer, type SourceCitation } from '../core/application/citation-answerer';
+import { RagPipeline } from '../core/application/rag-pipeline';
 import { SourceRegistry, type SourceRecord } from '../core/index/source-registry';
 import { ChunkRegistry } from '../core/index/chunk-registry';
 import { ChunkPipeline } from '../core/index/chunk-pipeline';
 import { IndexUpdateOrchestrator } from '../core/index/index-update-orchestrator';
 import { LocalFullTextSearch } from '../core/index/local-full-text-search';
 import { LocalVectorStore, type VectorStoreState } from '../core/index/local-vector-store';
+import { HybridRetrieval } from '../core/index/hybrid-retrieval';
+import { RetrievalReranker } from '../core/index/retrieval-reranker';
 import { SourceEventHandler } from './source-events';
 import { OpenAIEmbeddingProvider } from './openai-embedding-provider';
+import { OpenAILLMProvider } from './openai-llm-provider';
 import { loadSettings, type PluginSettings } from '../settings';
 
 export default class PrismPlugin extends Plugin {
@@ -17,6 +21,7 @@ export default class PrismPlugin extends Plugin {
   fullTextSearch?: LocalFullTextSearch;
   vectorStore?: LocalVectorStore;
   private sourceEvents?: SourceEventHandler;
+  private ragPipeline?: RagPipeline;
   private savedData: Record<string, unknown> = {};
   private dataWrite: Promise<void> = Promise.resolve();
   private rebuildState: 'ready' | 'rebuilding' | 'failed' = 'ready';
@@ -114,6 +119,31 @@ export default class PrismPlugin extends Plugin {
     const sourceEvents = new SourceEventHandler(this.app.vault, this.sourceRegistry,
       new ChunkPipeline(this.sourceRegistry, this.chunkRegistry), indexUpdates);
     this.sourceEvents = sourceEvents;
+    const retrieval = new HybridRetrieval(fullText, {
+      search: async (vector, limit) => vector.length === 0 ? [] :
+        (await getVectorStore())?.search(vector, limit) ?? [],
+    });
+    const reranker = new RetrievalReranker((chunkId) => chunks.get(chunkId)?.content);
+    const answerer = new CitationAnswerer({
+      generate: (request) => {
+        const key = this.app.secretStorage.getSecret('prism-llm-api-key');
+        if (!key || !this.settings.llmModel.trim()) {
+          throw new Error('Configure an LLM model and API key before asking Prism.');
+        }
+        return new OpenAILLMProvider(key, this.settings.llmModel).generate(request);
+      },
+    }, chunks, (path) => {
+      const file = this.app.vault.getAbstractFileByPath(path);
+      return file instanceof TFile && file.extension === 'md';
+    });
+    this.ragPipeline = new RagPipeline(async (query) => {
+      if (!this.settings.allowRemoteEmbeddingIndexing ||
+          this.savedData.vectorIndexModel !== this.settings.embeddingModel) return [];
+      const store = await getVectorStore();
+      const key = this.app.secretStorage.getSecret('prism-embedding-api-key');
+      if (!store || !key || !this.settings.embeddingModel.trim()) return [];
+      return new OpenAIEmbeddingProvider(key, this.settings.embeddingModel).embed(query);
+    }, retrieval, reranker, chunks, answerer);
     this.registerEvent(this.app.vault.on('create', (file) => {
       return sourceEvents.create(file).catch(() => new Notice('Prism could not index a Markdown source. Check embedding settings and plugin storage.'));
     }));
@@ -145,6 +175,11 @@ export default class PrismPlugin extends Plugin {
     if (!(file instanceof TFile) || file.extension !== 'md') return false;
     await this.app.workspace.getLeaf(false).openFile(file);
     return true;
+  }
+
+  async answerQuery(query: string): Promise<CitedAnswer> {
+    if (!this.ragPipeline) throw new Error('Prism search is not ready.');
+    return this.ragPipeline.answer(query);
   }
 
   rebuildIndex(): Promise<void> {
@@ -244,7 +279,7 @@ class PrismSettingTab extends PluginSettingTab {
     }
 
     containerEl.createEl('p', {
-      text: 'Remote processing: OpenAI receives Markdown or chunk text for embeddings, and your query plus retrieved source IDs and text for answers. This data leaves your Vault for those requests.',
+      text: 'Remote processing: OpenAI receives Markdown or chunk text for embeddings when enabled, and your query for vector search when a consented vector index exists. For answers, OpenAI receives your query plus retrieved source IDs, chunk IDs, and text. This data leaves your Vault for those requests.',
     });
 
     new Setting(containerEl)
