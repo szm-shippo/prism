@@ -36,6 +36,8 @@ Markdown の削除イベントでは対象 Source の Chunk を除いてから R
 
 `local-vector-store.ts` は純粋な TypeScript で Vector を保存し、コサイン類似度による Top-K 検索を行う。保存先と次元数は呼び出し側から渡す。保存済みの次元数と異なるモデルを使う場合は再構築が必要である。ゼロ Vector、非有限値、次元不一致は拒否する。検索は全件走査とし、ANN は行わない。全文検索・Vector とも、保存失敗時にはメモリ上の旧状態を保持し、Vault Markdown は変更しない。両ストアを Chunk 更新イベントへ接続する処理は後続のインデックス更新 Issue で行う。
 
+`hybrid-retrieval.ts` はテキストとクエリ Vector を受け取り、全文検索と Vector 検索を呼び出す。同じ Chunk ID は一件にまとめ、各検索結果の順位の逆数を加算して候補を並べる。両ストアのスコア尺度に依存せず、同じ Chunk ID に異なる Source ID が付いていれば再構築を要する不整合として拒否する。最終的な再順位付けは後続 Issue で行う。
+
 ## Markdown Chunker
 
 `src/core/index/markdown-chunker.ts` は見出し行（コードフェンス外）を境界にして、見出しと本文をひとつの Chunk にする。各 Chunk の `location` は元 Markdown の1始まりの行番号で、`content_hash` は内容から、`chunk_id` は source ID・開始行・内容から決定的に算出する。再実行時に同じ入力から同じ ID を得られるようにするためであり、これらは Vault Markdown から再生成できる派生値である。現在の分割は見出し単位で、長さによる再分割は行わない。
