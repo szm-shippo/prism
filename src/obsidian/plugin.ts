@@ -1,5 +1,6 @@
 import { Notice, Plugin, PluginSettingTab, Setting } from 'obsidian';
 import { SourceRegistry, type SourceRecord } from '../core/index/source-registry';
+import { SourceEventHandler } from './source-events';
 import { loadSettings, type PluginSettings } from '../settings';
 
 export default class PrismPlugin extends Plugin {
@@ -18,6 +19,10 @@ export default class PrismPlugin extends Plugin {
         await this.savePluginData({ sourceRegistry: records });
       },
     });
+    const sourceEvents = new SourceEventHandler(this.app.vault, this.sourceRegistry);
+    this.registerEvent(this.app.vault.on('create', (file) => {
+      void sourceEvents.create(file).catch(() => new Notice('Prism could not register a Markdown source. Check plugin storage.'));
+    }));
     this.addSettingTab(new PrismSettingTab(this));
   }
 
