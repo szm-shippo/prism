@@ -109,6 +109,14 @@ async function loadPlugin(savedData, failSave = false, storedSecrets = new Map()
         TFile: MockTFile,
         requestUrl: async (request) => {
           requests.push(request);
+          if (request.url.endsWith('/responses')) {
+            const messages = JSON.parse(request.body).input;
+            const reference = messages.find((message) => message.content.startsWith('Reference material:\n'));
+            const context = JSON.parse(reference.content.slice('Reference material:\n'.length));
+            return { status: 200, text: JSON.stringify({ output: [{ type: 'message', content: [
+              { type: 'output_text', text: `Grounded answer [cite:${context[0].chunkId}]` },
+            ] }] }) };
+          }
           const inputs = JSON.parse(request.body).input;
           return { status: 200, text: JSON.stringify({
             data: inputs.map((_, index) => ({ index, embedding: [index + 1, 1] })),
@@ -141,6 +149,47 @@ test('citation opens the current Markdown path after a move and ignores missing 
   assert.equal(await plugin.openCitation(citation), false);
   assert.equal(await plugin.openCitation({ sourceId: 'missing' }), false);
   assert.equal(openedFiles.length, 2);
+});
+
+test('query flows from local retrieval to a cited answer without remote embedding consent', async () => {
+  const { plugin, listeners, MockTFile, requests } = await loadPlugin(null);
+  await plugin.setLlmModel('answer-model');
+  plugin.setLlmApiKey('test-key');
+  const file = new MockTFile('facts.md', '# Local fact');
+  plugin.app.vault.files = [file];
+  await listeners.get('create')(file);
+  const answer = await plugin.answerQuery('Local');
+  assert.equal(answer.content, 'Grounded answer [^1]');
+  assert.equal(answer.citations.length, 1);
+  assert.equal(answer.citations[0].sourceId, plugin.sourceRegistry.getByPath('facts.md').source_id);
+  assert.equal(answer.citations[0].path, 'facts.md');
+  assert.equal(answer.citations[0].startLine, 1);
+  assert.deepEqual(requests.map((request) => request.url), ['https://api.openai.com/v1/responses']);
+  assert.equal((await plugin.answerQuery('no-matching-term')).citations.length, 0);
+  assert.equal(requests.length, 1);
+});
+
+test('query uses a consented vector index and discloses the query embedding request', async () => {
+  const { plugin, listeners, MockTFile, requests, tabs } = await loadPlugin(null);
+  await plugin.setEmbeddingModel('embedding-model');
+  plugin.setEmbeddingApiKey('test-key');
+  await plugin.setAllowRemoteEmbeddingIndexing(true);
+  await plugin.setLlmModel('answer-model');
+  plugin.setLlmApiKey('test-key');
+  const file = new MockTFile('facts.md', '# Searchable fact');
+  plugin.app.vault.files = [file];
+  await listeners.get('create')(file);
+  const answer = await plugin.answerQuery('Searchable');
+  assert.equal(answer.citations[0].path, 'facts.md');
+  assert.deepEqual(requests.map((request) => request.url), [
+    'https://api.openai.com/v1/embeddings',
+    'https://api.openai.com/v1/embeddings',
+    'https://api.openai.com/v1/responses',
+  ]);
+  assert.deepEqual(JSON.parse(requests[1].body).input, ['Searchable']);
+  tabs[0].display();
+  assert.match(tabs[0].containerEl.children.find((child) => child.text?.startsWith('Remote processing')).text,
+    /query for vector search/);
 });
 
 test('Vault create event updates the local full-text index without embedding credentials', async () => {
@@ -409,7 +458,7 @@ test('provider models persist and remote data transmission is disclosed', async 
   const children = first.tabs[0].containerEl.children;
   const disclosure = children.find((child) => typeof child.text === 'string' && child.text.includes('Remote processing'));
   assert.match(disclosure.text, /OpenAI receives Markdown or chunk text/);
-  assert.match(disclosure.text, /query plus retrieved source IDs and text/);
+  assert.match(disclosure.text, /query plus retrieved source IDs, chunk IDs, and text/);
   await children.find((child) => child.name === 'Embedding model').text.change('embedding-model');
   await children.find((child) => child.name === 'LLM model').text.change('text-model');
   const restarted = await loadPlugin(first.writes.at(-1));
