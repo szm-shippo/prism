@@ -13,6 +13,7 @@ import { isExcludedPath, parseExcludedPaths } from '../core/index/exclusion-rule
 import { SourceEventHandler } from './source-events';
 import { OpenAIEmbeddingProvider } from './openai-embedding-provider';
 import { OpenAILLMProvider } from './openai-llm-provider';
+import { CHAT_VIEW_TYPE, PrismChatView } from './chat-view';
 import { loadSettings, type PluginSettings } from '../settings';
 
 export default class PrismPlugin extends Plugin {
@@ -177,6 +178,12 @@ export default class PrismPlugin extends Plugin {
     this.registerEvent(this.app.vault.on('delete', (file) => {
       return sourceEvents.delete(file).catch(() => new Notice('Prism could not remove a Markdown source. Check plugin storage.'));
     }));
+    this.registerView(CHAT_VIEW_TYPE, (leaf) => new PrismChatView(leaf, (query) => this.answerQuery(query)));
+    const showChat = () => this.openChatView().catch(() => {
+      new Notice('Prism could not open the Ask view. Try again.');
+    });
+    this.addCommand({ id: 'open-chat', name: 'Open Ask view', callback: showChat });
+    this.addRibbonIcon('message-square', 'Open Prism Ask', showChat);
     this.addSettingTab(new PrismSettingTab(this));
   }
 
@@ -201,6 +208,13 @@ export default class PrismPlugin extends Plugin {
   async answerQuery(query: string): Promise<CitedAnswer> {
     if (!this.ragPipeline) throw new Error('Prism search is not ready.');
     return this.ragPipeline.answer(query);
+  }
+
+  private async openChatView(): Promise<void> {
+    const workspace = this.app.workspace;
+    const leaf = workspace.getLeavesOfType(CHAT_VIEW_TYPE)[0] ?? workspace.getLeaf(true);
+    await leaf.setViewState({ type: CHAT_VIEW_TYPE, active: true });
+    await workspace.revealLeaf(leaf);
   }
 
   rebuildIndex(): Promise<void> {
