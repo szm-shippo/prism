@@ -30,7 +30,9 @@ Markdown の削除イベントでは対象 Source の Chunk を除いてから R
 
 ## 検索ストア境界
 
-`full-text-search.ts` は Chunk の登録・更新・Source 単位の削除・検索・全消去を定義する。`vector-store.ts` は Vector の登録・更新・Chunk または Source 単位の削除・検索・全消去を定義する。Vector の値は既知のモデル次元数に一致する有限数列として検証する。具体的なストアと検索スコアは後続 Issue で決める。
+`full-text-search.ts` は Chunk の登録・更新・Source 単位の削除・検索・全消去を定義する。`vector-store.ts` は Vector の登録・更新・Chunk または Source 単位の削除・検索・全消去を定義する。Vector の値は既知のモデル次元数に一致する有限数列として検証する。
+
+`local-full-text-search.ts` は純粋な TypeScript で Chunk のテキストを保存し、大文字小文字を区別しない部分文字列検索を行う。空白で区切った語とクエリ全体の出現回数を順位に使う。これにより識別子、数字、エラー文字列、日本語の連続した文字列を検索できる。形態素解析は行わない。保存先は呼び出し側から注入し、データは Vault Markdown から再構築できる。Chunk 更新は同じ ID の内容を置換し、削除済み Chunk の整理は Source 単位の削除で行う。
 
 ## Markdown Chunker
 
