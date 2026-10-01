@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { webcrypto } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import { runInNewContext } from 'node:vm';
@@ -45,6 +46,8 @@ async function loadPlugin(savedData, failSave = false) {
   }
 
   runInNewContext(bundle, {
+    crypto: webcrypto,
+    TextEncoder,
     module,
     exports: module.exports,
     require(specifier) {
@@ -102,4 +105,18 @@ test('failed save keeps the previous setting and reports the error', async () =>
   assert.equal(plugin.settings.showVaultNotice, true);
   assert.equal(toggle.value, true);
   assert.match(notices[0], /could not save/);
+});
+
+test('source registry records survive restart alongside settings', async () => {
+  const first = await loadPlugin({ showVaultNotice: false });
+  const record = await first.plugin.sourceRegistry.create({
+    path: 'Notes/one.md', content: '# Note', mtime: 12, size: 6,
+  });
+  assert.equal(first.writes[0].showVaultNotice, false);
+  assert.equal(first.writes[0].sourceRegistry[0].source_id, record.source_id);
+
+  const restarted = await loadPlugin(first.writes[0]);
+  assert.deepEqual(structuredClone(restarted.plugin.sourceRegistry.getById(record.source_id)), structuredClone(record));
+  await restarted.plugin.setShowVaultNotice(true);
+  assert.equal(restarted.writes[0].sourceRegistry[0].source_id, record.source_id);
 });
