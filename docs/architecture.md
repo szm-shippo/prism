@@ -34,6 +34,8 @@ Markdown の削除イベントでは対象 Source の Chunk を除いてから R
 
 `local-full-text-search.ts` は純粋な TypeScript で Chunk のテキストを保存し、大文字小文字を区別しない部分文字列検索を行う。空白で区切った語とクエリ全体の出現回数を順位に使う。これにより識別子、数字、エラー文字列、日本語の連続した文字列を検索できる。形態素解析は行わない。保存先は呼び出し側から注入し、データは Vault Markdown から再構築できる。Chunk 更新は同じ ID の内容を置換し、削除済み Chunk の整理は Source 単位の削除で行う。
 
+`local-vector-store.ts` は純粋な TypeScript で Vector を保存し、コサイン類似度による Top-K 検索を行う。保存先と次元数は呼び出し側から渡す。保存済みの次元数と異なるモデルを使う場合は再構築が必要である。ゼロ Vector、非有限値、次元不一致は拒否する。検索は全件走査とし、ANN は行わない。全文検索・Vector とも、保存失敗時にはメモリ上の旧状態を保持し、Vault Markdown は変更しない。両ストアを Chunk 更新イベントへ接続する処理は後続のインデックス更新 Issue で行う。
+
 ## Markdown Chunker
 
 `src/core/index/markdown-chunker.ts` は見出し行（コードフェンス外）を境界にして、見出しと本文をひとつの Chunk にする。各 Chunk の `location` は元 Markdown の1始まりの行番号で、`content_hash` は内容から、`chunk_id` は source ID・開始行・内容から決定的に算出する。再実行時に同じ入力から同じ ID を得られるようにするためであり、これらは Vault Markdown から再生成できる派生値である。現在の分割は見出し単位で、長さによる再分割は行わない。
