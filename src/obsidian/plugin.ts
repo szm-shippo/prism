@@ -1,12 +1,15 @@
 import { Notice, Plugin, PluginSettingTab, Setting } from 'obsidian';
 import { SourceRegistry, type SourceRecord } from '../core/index/source-registry';
+import { ChunkRegistry } from '../core/index/chunk-registry';
 import { SourceEventHandler } from './source-events';
 import { loadSettings, type PluginSettings } from '../settings';
 
 export default class PrismPlugin extends Plugin {
   settings: PluginSettings = loadSettings(null);
   sourceRegistry?: SourceRegistry;
+  chunkRegistry?: ChunkRegistry;
   private savedData: Record<string, unknown> = {};
+  private dataWrite: Promise<void> = Promise.resolve();
 
   async onload(): Promise<void> {
     const loaded = await this.loadData();
@@ -19,6 +22,12 @@ export default class PrismPlugin extends Plugin {
         await this.savePluginData({ sourceRegistry: records });
       },
     });
+    this.chunkRegistry = await ChunkRegistry.open({
+      load: async () => this.savedData.chunkRegistry,
+      save: async (chunks) => {
+        await this.savePluginData({ chunkRegistry: chunks });
+      },
+    }, this.sourceRegistry);
     const sourceEvents = new SourceEventHandler(this.app.vault, this.sourceRegistry);
     this.registerEvent(this.app.vault.on('create', (file) => {
       void sourceEvents.create(file).catch(() => new Notice('Prism could not register a Markdown source. Check plugin storage.'));
@@ -41,9 +50,13 @@ export default class PrismPlugin extends Plugin {
   }
 
   private async savePluginData(changes: Record<string, unknown>): Promise<void> {
-    const updated = { ...this.savedData, ...changes };
-    await this.saveData(updated);
-    this.savedData = updated;
+    const write = this.dataWrite.then(async () => {
+      const updated = { ...this.savedData, ...changes };
+      await this.saveData(updated);
+      this.savedData = updated;
+    });
+    this.dataWrite = write.catch(() => undefined);
+    await write;
   }
 }
 
