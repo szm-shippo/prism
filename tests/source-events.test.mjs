@@ -19,6 +19,10 @@ async function bundle(relativePath, format = 'esm') {
 
 const registryBundle = await bundle('../src/core/index/source-registry.ts');
 const { SourceRegistry } = await import(`data:text/javascript;base64,${Buffer.from(registryBundle.contents).toString('base64')}`);
+const chunkRegistryBundle = await bundle('../src/core/index/chunk-registry.ts');
+const { ChunkRegistry } = await import(`data:text/javascript;base64,${Buffer.from(chunkRegistryBundle.contents).toString('base64')}`);
+const pipelineBundle = await bundle('../src/core/index/chunk-pipeline.ts');
+const { ChunkPipeline } = await import(`data:text/javascript;base64,${Buffer.from(pipelineBundle.contents).toString('base64')}`);
 
 class TFile {
   constructor(path, content) {
@@ -47,6 +51,55 @@ function makeRegistry() {
     save: async (records) => { saved = structuredClone(records); },
   });
 }
+
+test('Vault events create, update, move and delete chunks without changing Markdown', async () => {
+  const registry = await makeRegistry();
+  let saved;
+  const chunks = await ChunkRegistry.open({
+    load: async () => saved,
+    save: async (records) => { saved = structuredClone(records); },
+  }, registry);
+  const handler = new SourceEventHandler({ read: async (file) => file.content }, registry,
+    new ChunkPipeline(registry, chunks));
+  const file = new TFile('note.md', '# One\n## Old');
+  await handler.create(file);
+  const sourceId = registry.getByPath(file.path).source_id;
+  assert.equal(chunks.listBySource(sourceId).length, 2);
+  const oldChunkId = chunks.listBySource(sourceId)[1].chunk_id;
+  file.content = '# One\n## New';
+  file.stat.size = file.content.length;
+  await handler.modify(file);
+  assert.equal(chunks.get(oldChunkId), undefined);
+  assert.equal(chunks.listBySource(sourceId)[1].content, '## New');
+  file.path = 'moved.md';
+  await handler.rename(file, 'note.md');
+  assert.equal(chunks.provenance(chunks.listBySource(sourceId)[0].chunk_id).path, 'moved.md');
+  await handler.delete(file);
+  assert.deepEqual(chunks.listBySource(sourceId), []);
+  assert.equal(file.content, '# One\n## New');
+});
+
+test('failed chunk persistence leaves Markdown untouched and a duplicate create retries', async () => {
+  const registry = await makeRegistry();
+  let fail = true;
+  let saved;
+  const chunks = await ChunkRegistry.open({
+    load: async () => saved,
+    save: async (records) => {
+      if (fail) throw new Error('chunk save failed');
+      saved = structuredClone(records);
+    },
+  }, registry);
+  const handler = new SourceEventHandler({ read: async (file) => file.content }, registry,
+    new ChunkPipeline(registry, chunks));
+  const file = new TFile('retry.md', '# Retry');
+  await assert.rejects(handler.create(file), /chunk save failed/);
+  assert.equal(file.content, '# Retry');
+  assert.equal(chunks.listBySource(registry.getByPath(file.path).source_id).length, 0);
+  fail = false;
+  await handler.create(file);
+  assert.equal(chunks.listBySource(registry.getByPath(file.path).source_id).length, 1);
+});
 
 test('Markdown create event stores source metadata and ignores duplicate events', async () => {
   const registry = await makeRegistry();
