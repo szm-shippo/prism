@@ -23,6 +23,9 @@ export default class PrismPlugin extends Plugin {
     this.registerEvent(this.app.vault.on('create', (file) => {
       void sourceEvents.create(file).catch(() => new Notice('Prism could not register a Markdown source. Check plugin storage.'));
     }));
+    this.registerEvent(this.app.vault.on('modify', (file) => {
+      void sourceEvents.modify(file).catch(() => new Notice('Prism could not update a Markdown source. Check plugin storage.'));
+    }));
     this.addSettingTab(new PrismSettingTab(this));
   }
 

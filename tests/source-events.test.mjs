@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { runInNewContext } from 'node:vm';
+import { webcrypto } from 'node:crypto';
 import { build } from 'esbuild';
 
 async function bundle(relativePath, format = 'esm') {
@@ -34,6 +35,8 @@ runInNewContext(sourceEventsBundle.text, {
   module,
   exports: module.exports,
   require: () => ({ TFile }),
+  crypto: webcrypto,
+  TextEncoder,
 });
 const { SourceEventHandler } = module.exports;
 
@@ -77,4 +80,31 @@ test('failed Vault read leaves registry unchanged and does not block later event
   await assert.rejects(handler.create(new TFile('bad.md', 'x')), /read failed/);
   await handler.create(new TFile('good.md', '# Good'));
   assert.equal(registry.list().length, 1);
+});
+
+test('Markdown modify detects changed content and updates source metadata', async () => {
+  const registry = await makeRegistry();
+  const handler = new SourceEventHandler({ read: async (file) => file.content }, registry);
+  const file = new TFile('note.md', '# Before');
+  await handler.create(file);
+  const original = registry.getByPath(file.path);
+  file.content = '# After';
+  file.stat = { mtime: 21, size: file.content.length };
+  const result = await handler.modify(file);
+  assert.deepEqual(structuredClone(result), { sourceId: original.source_id, contentChanged: true });
+  assert.notEqual(registry.getByPath(file.path).content_hash, original.content_hash);
+  assert.equal(registry.getByPath(file.path).mtime, 21);
+
+  const repeated = await handler.modify(file);
+  assert.deepEqual(structuredClone(repeated), { sourceId: original.source_id, contentChanged: false });
+  file.stat.mtime = 22;
+  assert.equal((await handler.modify(file)).contentChanged, false);
+  assert.equal(registry.getByPath(file.path).mtime, 22);
+});
+
+test('modify ignores non-Markdown and unknown sources', async () => {
+  const registry = await makeRegistry();
+  const handler = new SourceEventHandler({ read: async () => { throw new Error('unexpected read'); } }, registry);
+  assert.equal(await handler.modify(new TFile('photo.png', 'binary')), undefined);
+  assert.equal(await handler.modify(new TFile('unknown.md', '# Unknown')), undefined);
 });
