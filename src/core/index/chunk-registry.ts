@@ -79,6 +79,10 @@ export class ChunkRegistry {
     return removed;
   }
 
+  async clear(): Promise<void> {
+    if (this.chunks.length > 0) await this.commit([]);
+  }
+
   provenance(chunkId: string): { sourceId: string; path: string; startLine: number; endLine: number } | undefined {
     const chunk = this.get(chunkId);
     if (!chunk) return undefined;

@@ -28,6 +28,8 @@ async function loadPlugin(savedData, failSave = false, storedSecrets = new Map()
       setSecret(id, value) { storedSecrets.set(id, value); },
       getSecret(id) { return storedSecrets.get(id) ?? null; },
     }, vault: {
+      files: [],
+      getMarkdownFiles() { return this.files; },
       on(name, callback) { listeners.set(name, callback); return { name }; },
       async read(file) { return file.content; },
     } };
@@ -125,6 +127,53 @@ test('Vault create event updates the local full-text index without embedding cre
   assert.equal(file.content, '# Local search');
   assert.deepEqual(notices, []);
   assert.deepEqual(requests, []);
+});
+
+test('full rebuild replaces stale sources and indexes from Vault Markdown, including consented vectors', async () => {
+  const { plugin, listeners, MockTFile, requests } = await loadPlugin(null);
+  await plugin.setEmbeddingModel('test-embedding-model');
+  plugin.setEmbeddingApiKey('test-key');
+  await plugin.setAllowRemoteEmbeddingIndexing(true);
+  const stale = new MockTFile('stale.md', '# Stale');
+  await listeners.get('create')(stale);
+  const staleId = plugin.sourceRegistry.getByPath('stale.md').source_id;
+  assert.equal(requests.length, 1);
+
+  const current = new MockTFile('current.md', '# Current');
+  plugin.app.vault.files = [current];
+  await plugin.rebuildIndex();
+
+  assert.equal(plugin.sourceRegistry.getByPath('stale.md'), undefined);
+  const source = plugin.sourceRegistry.getByPath('current.md');
+  assert.ok(source);
+  assert.equal(plugin.chunkRegistry.listBySource(source.source_id).length, 1);
+  assert.equal((await plugin.fullTextSearch.search('Stale', 5)).length, 0);
+  assert.equal((await plugin.fullTextSearch.search('Current', 5))[0].sourceId, source.source_id);
+  assert.equal(plugin.vectorStore.listBySource(source.source_id).length, 1);
+  assert.equal(plugin.vectorStore.listBySource(staleId).length, 0);
+  assert.equal(requests.length, 2);
+  assert.equal(current.content, '# Current');
+  assert.equal(stale.content, '# Stale');
+});
+
+test('failed rebuild leaves Markdown intact and can be retried without remote consent', async () => {
+  const { plugin, listeners, MockTFile, requests } = await loadPlugin(null);
+  const old = new MockTFile('old.md', '# Old');
+  await listeners.get('create')(old);
+  const current = new MockTFile('current.md', '# Current');
+  plugin.app.vault.files = [current];
+  const read = plugin.app.vault.read;
+  plugin.app.vault.read = async () => { throw new Error('Vault read failed'); };
+  await assert.rejects(plugin.rebuildIndex(), /Vault read failed/);
+  assert.equal(current.content, '# Current');
+  assert.equal(old.content, '# Old');
+  plugin.app.vault.read = read;
+  await plugin.rebuildIndex();
+  assert.equal(plugin.sourceRegistry.list().length, 1);
+  assert.equal((await plugin.fullTextSearch.search('Current', 5)).length, 1);
+  assert.equal((await plugin.fullTextSearch.search('Old', 5)).length, 0);
+  assert.equal(plugin.vectorStore, undefined);
+  assert.equal(requests.length, 0);
 });
 
 test('remote indexing sends only changed chunks after explicit opt-in and stops after opt-out', async () => {

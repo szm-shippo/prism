@@ -123,6 +123,10 @@ export class SourceRegistry {
     return true;
   }
 
+  async clear(): Promise<void> {
+    if (this.records.length > 0) await this.commit([]);
+  }
+
   async deletePaths(path: string): Promise<string[]> {
     if (!validVaultPath(path)) throw new Error('A Vault-relative path is required to delete sources.');
     const removed = this.records.filter((record) => record.path === path || record.path.startsWith(`${path}/`));
