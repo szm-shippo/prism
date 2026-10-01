@@ -53,6 +53,15 @@ test('remote LLM sends query and untrusted reference context and extracts respon
   assert.deepEqual(body.input[2], query.messages[0]);
 });
 
+test('remote LLM preserves chunk IDs for source citations', async () => {
+  const { provider, calls } = providerWith({ status: 200, text: JSON.stringify({
+    output: [{ type: 'message', content: [{ type: 'output_text', text: 'Answer [cite:chunk-1]' }] }],
+  }) });
+  await provider.generate({ ...query, context: [{ sourceId: 'source-1', chunkId: 'chunk-1', content: 'Evidence' }] });
+  const body = JSON.parse(calls[0].body);
+  assert.match(body.input[1].content, /"chunkId":"chunk-1"/);
+});
+
 test('provider and transport errors do not reveal request or credentials', async () => {
   for (const [status, code] of [[401, 'authentication'], [429, 'rate_limit'], [500, 'unavailable']]) {
     const { provider } = providerWith({ status, text: 'credential and private note' });
