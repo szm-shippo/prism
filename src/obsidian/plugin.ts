@@ -49,6 +49,34 @@ export default class PrismPlugin extends Plugin {
     this.settings = { ...this.settings, showVaultNotice: value };
   }
 
+  async setEmbeddingModel(value: string): Promise<void> {
+    const embeddingModel = value.trim();
+    await this.savePluginData({ embeddingModel });
+    this.settings = { ...this.settings, embeddingModel };
+  }
+
+  async setLlmModel(value: string): Promise<void> {
+    const llmModel = value.trim();
+    await this.savePluginData({ llmModel });
+    this.settings = { ...this.settings, llmModel };
+  }
+
+  setEmbeddingApiKey(value: string): void {
+    this.app.secretStorage.setSecret('prism-embedding-api-key', value.trim());
+  }
+
+  setLlmApiKey(value: string): void {
+    this.app.secretStorage.setSecret('prism-llm-api-key', value.trim());
+  }
+
+  hasEmbeddingApiKey(): boolean {
+    return Boolean(this.app.secretStorage.getSecret('prism-embedding-api-key'));
+  }
+
+  hasLlmApiKey(): boolean {
+    return Boolean(this.app.secretStorage.getSecret('prism-llm-api-key'));
+  }
+
   private async savePluginData(changes: Record<string, unknown>): Promise<void> {
     const write = this.dataWrite.then(async () => {
       const updated = { ...this.savedData, ...changes };
@@ -89,5 +117,75 @@ class PrismSettingTab extends PluginSettingTab {
         text: 'Prism uses Markdown in your Vault as its source of truth.',
       });
     }
+
+    containerEl.createEl('p', {
+      text: 'Remote processing: OpenAI receives Markdown or chunk text for embeddings, and your query plus retrieved source IDs and text for answers. This data leaves your Vault for those requests.',
+    });
+
+    new Setting(containerEl)
+      .setName('Embedding model')
+      .setDesc('OpenAI model ID used for embeddings.')
+      .addText((text) => text
+        .setPlaceholder('Model ID')
+        .setValue(this.prism.settings.embeddingModel)
+        .onChange(async (value) => {
+          try {
+            await this.prism.setEmbeddingModel(value);
+          } catch {
+            new Notice('Prism could not save the embedding model. Try again.');
+          }
+        }));
+
+    new Setting(containerEl)
+      .setName('LLM model')
+      .setDesc('OpenAI model ID used for answers.')
+      .addText((text) => text
+        .setPlaceholder('Model ID')
+        .setValue(this.prism.settings.llmModel)
+        .onChange(async (value) => {
+          try {
+            await this.prism.setLlmModel(value);
+          } catch {
+            new Notice('Prism could not save the LLM model. Try again.');
+          }
+        }));
+
+    this.addApiKeySetting('Embedding API key', this.prism.hasEmbeddingApiKey(),
+      (value) => this.prism.setEmbeddingApiKey(value));
+    this.addApiKeySetting('LLM API key', this.prism.hasLlmApiKey(),
+      (value) => this.prism.setLlmApiKey(value));
+  }
+
+  private addApiKeySetting(name: string, configured: boolean, save: (value: string) => void): void {
+    new Setting(this.containerEl)
+      .setName(name)
+      .setDesc(configured ? 'Configured in Obsidian Secret Storage. Enter a new key and leave the field to replace it.'
+        : 'Enter a key and leave the field to save it in Obsidian Secret Storage.')
+      .addText((text) => {
+        text.inputEl.type = 'password';
+        text.setPlaceholder(configured ? 'Configured' : 'API key');
+        text.inputEl.addEventListener('change', () => {
+          const value = text.getValue().trim();
+          if (!value) return;
+          try {
+            save(value);
+            text.setValue('');
+            this.display();
+          } catch {
+            text.setValue('');
+            new Notice('Prism could not save the API key. Try again.');
+          }
+        });
+      })
+      .addButton((button) => button
+        .setButtonText('Clear')
+        .onClick(() => {
+          try {
+            save('');
+            this.display();
+          } catch {
+            new Notice('Prism could not clear the API key. Try again.');
+          }
+        }));
   }
 }
