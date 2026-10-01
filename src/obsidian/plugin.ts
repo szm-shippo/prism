@@ -15,6 +15,7 @@ export default class PrismPlugin extends Plugin {
   chunkRegistry?: ChunkRegistry;
   fullTextSearch?: LocalFullTextSearch;
   vectorStore?: LocalVectorStore;
+  private sourceEvents?: SourceEventHandler;
   private savedData: Record<string, unknown> = {};
   private dataWrite: Promise<void> = Promise.resolve();
 
@@ -101,9 +102,15 @@ export default class PrismPlugin extends Plugin {
         }
       },
       delete: (sourceId: string): Promise<void> => remoteIndexes.delete(sourceId),
+      clear: async (): Promise<void> => {
+        await fullText.clear();
+        await this.savePluginData({ vectorIndex: null, vectorIndexModel: null });
+        this.vectorStore = undefined;
+      },
     };
     const sourceEvents = new SourceEventHandler(this.app.vault, this.sourceRegistry,
       new ChunkPipeline(this.sourceRegistry, this.chunkRegistry), indexUpdates);
+    this.sourceEvents = sourceEvents;
     this.registerEvent(this.app.vault.on('create', (file) => {
       return sourceEvents.create(file).catch(() => new Notice('Prism could not index a Markdown source. Check embedding settings and plugin storage.'));
     }));
@@ -117,6 +124,11 @@ export default class PrismPlugin extends Plugin {
       return sourceEvents.delete(file).catch(() => new Notice('Prism could not remove a Markdown source. Check plugin storage.'));
     }));
     this.addSettingTab(new PrismSettingTab(this));
+  }
+
+  async rebuildIndex(): Promise<void> {
+    if (!this.sourceEvents) throw new Error('Prism indexes are not ready.');
+    await this.sourceEvents.rebuild();
   }
 
   async setShowVaultNotice(value: boolean): Promise<void> {

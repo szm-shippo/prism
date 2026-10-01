@@ -34,11 +34,15 @@ Markdown の削除イベントでは対象 Source の Chunk を除いてから R
 
 `local-full-text-search.ts` は純粋な TypeScript で Chunk のテキストを保存し、大文字小文字を区別しない部分文字列検索を行う。空白で区切った語とクエリ全体の出現回数を順位に使う。これにより識別子、数字、エラー文字列、日本語の連続した文字列を検索できる。形態素解析は行わない。保存先は呼び出し側から注入し、データは Vault Markdown から再構築できる。Chunk 更新は同じ ID の内容を置換し、削除済み Chunk の整理は Source 単位の削除で行う。
 
-`local-vector-store.ts` は純粋な TypeScript で Vector を保存し、コサイン類似度による Top-K 検索を行う。保存先と次元数は呼び出し側から渡す。保存済みの次元数と異なるモデルを使う場合は再構築が必要である。ゼロ Vector、非有限値、次元不一致は拒否する。検索は全件走査とし、ANN は行わない。全文検索・Vector とも、保存失敗時にはメモリ上の旧状態を保持し、Vault Markdown は変更しない。両ストアを Chunk 更新イベントへ接続する処理は後続のインデックス更新 Issue で行う。
+`local-vector-store.ts` は純粋な TypeScript で Vector を保存し、コサイン類似度による Top-K 検索を行う。保存先と次元数は呼び出し側から渡す。保存済みの次元数と異なるモデルを使う場合は再構築が必要である。ゼロ Vector、非有限値、次元不一致は拒否する。検索は全件走査とし、ANN は行わない。全文検索・Vector とも、保存失敗時にはメモリ上の旧状態を保持し、Vault Markdown は変更しない。
 
-`hybrid-retrieval.ts` はテキストとクエリ Vector を受け取り、全文検索と Vector 検索を呼び出す。同じ Chunk ID は一件にまとめ、各検索結果の順位の逆数を加算して候補を並べる。両ストアのスコア尺度に依存せず、同じ Chunk ID に異なる Source ID が付いていれば再構築を要する不整合として拒否する。最終的な再順位付けは後続 Issue で行う。
+`hybrid-retrieval.ts` はテキストとクエリ Vector を受け取り、全文検索と Vector 検索を呼び出す。同じ Chunk ID は一件にまとめ、各検索結果の順位の逆数を加算して候補を並べる。両ストアのスコア尺度に依存せず、同じ Chunk ID に異なる Source ID が付いていれば再構築を要する不整合として拒否する。
+
+`retrieval-reranker.ts` は候補の Chunk 本文とクエリを照合し、初期実装では語句の出現回数で並べ直す。追加の外部送信を伴わず Mobile でも使える方式として選んだ。評価エラーや Chunk 不在時は元の Hybrid Retrieval 順へ戻し、指定された Top-N に絞る。スコア付け処理は差し替え可能だが、モデルによる最適化はこの段階では行わない。
 
 Vault の作成・変更・削除イベントは Chunk Registry の更新後にローカル全文検索へ反映する。設定画面の「Send changed chunks to OpenAI for search indexing」は既定でオフにし、利用者がオンにした後の Vault イベントだけで、EmbeddingProvider を通じて `https://api.openai.com/v1/embeddings` に Chunk 本文を送る。オンにしただけでは既存 Note を送らない。オフの間も全文検索は更新し、変更・削除された Source の古い Vector を除く。`index-update-orchestrator.ts` は保存済み Vector の Chunk ID と内容ハッシュを比較し、新規・変更 Chunk のみを送信する。失敗時は現在の全文検索を保ち、古い Vector を残さず、次のイベントで再試行できる。Embedding モデルの変更時は、異なるモデルの Vector を混在させないため、派生 Vector インデックスを消去する。
+
+全再構築は Vault イベントと直列に実行し、派生した Source Registry、Chunk Registry、全文検索、Vector を消去してから Vault の Markdown を再走査する。失敗時は途中までの派生状態を残してエラーを返し、再実行時に最初から作り直す。Vault Markdown は書き換えない。Vector の再生成はリモート索引への明示的な同意と Embedding 設定がある場合だけ行う。
 
 ## Markdown Chunker
 
