@@ -1,4 +1,5 @@
-import { Notice, Plugin, PluginSettingTab, Setting } from 'obsidian';
+import { Notice, Plugin, PluginSettingTab, Setting, TFile } from 'obsidian';
+import type { SourceCitation } from '../core/application/citation-answerer';
 import { SourceRegistry, type SourceRecord } from '../core/index/source-registry';
 import { ChunkRegistry } from '../core/index/chunk-registry';
 import { ChunkPipeline } from '../core/index/chunk-pipeline';
@@ -135,6 +136,15 @@ export default class PrismPlugin extends Plugin {
       sources: sourceIds.length,
       chunks: sourceIds.reduce((count, id) => count + (this.chunkRegistry?.listBySource(id).length ?? 0), 0),
     };
+  }
+
+  async openCitation(citation: Pick<SourceCitation, 'sourceId'>): Promise<boolean> {
+    const source = this.sourceRegistry?.getById(citation.sourceId);
+    if (!source) return false;
+    const file = this.app.vault.getAbstractFileByPath(source.path);
+    if (!(file instanceof TFile) || file.extension !== 'md') return false;
+    await this.app.workspace.getLeaf(false).openFile(file);
+    return true;
   }
 
   rebuildIndex(): Promise<void> {
