@@ -147,7 +147,7 @@ test('model catalog includes listed models even when supported_in_api is absent 
     refreshToken: 'refresh-1', accountId: 'account-1', expiresAt: Date.now() + 3600_000 }));
   assert.deepEqual(structuredClone(await auth.listModels()), ['available-model', 'unsupported-model', 'new-model']);
   assert.equal(calls[0].headers['ChatGPT-Account-Id'], 'account-1');
-  assert.equal(calls[0].url, 'https://chatgpt.com/backend-api/codex/models?client_version=0.1.0');
+  assert.equal(calls[0].url, 'https://chatgpt.com/backend-api/codex/models?client_version=0.155.0');
 });
 
 test('model catalog failure reports safe HTTP status without exposing response or token', async () => {

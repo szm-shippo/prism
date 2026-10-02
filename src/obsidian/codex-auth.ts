@@ -6,6 +6,8 @@ const TOKEN_URL = `${AUTH_ORIGIN}/oauth/token`;
 const SECRET_ID = 'prism-codex-credential';
 const LOGIN_TIMEOUT_MS = 15 * 60 * 1000;
 const REFRESH_SKEW_MS = 2 * 60 * 1000;
+// The catalog filters by Codex client version; Prism's plugin version is unrelated.
+const CODEX_CATALOG_CLIENT_VERSION = '0.155.0';
 
 type Transport = typeof requestUrl;
 type SecretStore = { getSecret(id: string): string | null; setSecret(id: string, value: string): void };
@@ -157,8 +159,7 @@ export class CodexAuth {
   private generation = 0;
   private models?: string[];
 
-  constructor(private readonly secrets: SecretStore, private readonly transport: Transport = requestUrl,
-    private readonly clientVersion = '0.1.0') {}
+  constructor(private readonly secrets: SecretStore, private readonly transport: Transport = requestUrl) {}
 
   get accountId(): string | undefined { return this.read()?.accountId; }
   get connected(): boolean { return this.read() !== undefined; }
@@ -262,7 +263,7 @@ export class CodexAuth {
     const access = await this.access();
     const query = async (token: string, accountId: string) => {
       try {
-        return await this.transport({ url: `https://chatgpt.com/backend-api/codex/models?client_version=${encodeURIComponent(this.clientVersion)}`,
+        return await this.transport({ url: `https://chatgpt.com/backend-api/codex/models?client_version=${CODEX_CATALOG_CLIENT_VERSION}`,
           method: 'GET', headers: { Authorization: `Bearer ${token}`, 'ChatGPT-Account-Id': accountId,
             originator: 'prism' }, throw: false });
       } catch { throw new CodexModelListError('Could not load Codex models: connection failed.'); }

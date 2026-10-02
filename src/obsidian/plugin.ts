@@ -40,7 +40,7 @@ export default class PrismPlugin extends Plugin {
     this.savedData = typeof loaded === 'object' && loaded !== null && !Array.isArray(loaded)
       ? loaded as Record<string, unknown> : {};
     this.settings = loadSettings(this.savedData);
-    this.codexAuth = new CodexAuth(this.app.secretStorage, undefined, this.manifest.version);
+    this.codexAuth = new CodexAuth(this.app.secretStorage);
     this.sourceRegistry = await SourceRegistry.open({
       load: async () => this.savedData.sourceRegistry,
       save: async (records: readonly SourceRecord[]) => {

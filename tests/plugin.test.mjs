@@ -337,7 +337,7 @@ test('ChatGPT Ask sends the selected model when the optional model list is unava
   const answer = await plugin.answerQuery('6月12日');
   assert.equal(answer.citations[0]?.path, 'library.md');
   assert.deepEqual(requests.map((request) => request.url), [
-    'https://chatgpt.com/backend-api/codex/models?client_version=0.1.0',
+    'https://chatgpt.com/backend-api/codex/models?client_version=0.155.0',
     'https://chatgpt.com/backend-api/codex/responses',
   ]);
   assert.equal(JSON.parse(requests[1].body).model, 'gpt-5.5');
