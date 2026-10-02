@@ -13,6 +13,8 @@ import { isExcludedPath, parseExcludedPaths } from '../core/index/exclusion-rule
 import { SourceEventHandler } from './source-events';
 import { OpenAIEmbeddingProvider } from './openai-embedding-provider';
 import { OpenAILLMProvider } from './openai-llm-provider';
+import { CodexAuth, type DevicePrompt } from './codex-auth';
+import { CodexLLMProvider } from './codex-llm-provider';
 import { CHAT_VIEW_TYPE, PrismChatView } from './chat-view';
 import { loadSettings, type PluginSettings } from '../settings';
 
@@ -28,12 +30,16 @@ export default class PrismPlugin extends Plugin {
   private dataWrite: Promise<void> = Promise.resolve();
   private rebuildState: 'ready' | 'rebuilding' | 'failed' = 'ready';
   private rebuildPromise?: Promise<void>;
+  private codexAuth?: CodexAuth;
+  private codexPrompt?: DevicePrompt;
+  private prismSettingTab?: PrismSettingTab;
 
   async onload(): Promise<void> {
     const loaded = await this.loadData();
     this.savedData = typeof loaded === 'object' && loaded !== null && !Array.isArray(loaded)
       ? loaded as Record<string, unknown> : {};
     this.settings = loadSettings(this.savedData);
+    this.codexAuth = new CodexAuth(this.app.secretStorage, undefined, this.manifest.version);
     this.sourceRegistry = await SourceRegistry.open({
       load: async () => this.savedData.sourceRegistry,
       save: async (records: readonly SourceRecord[]) => {
@@ -146,7 +152,15 @@ export default class PrismPlugin extends Plugin {
     });
     const reranker = new RetrievalReranker((chunkId) => allowedChunk(chunkId)?.content);
     const answerer = new CitationAnswerer({
-      generate: (request) => {
+      generate: async (request) => {
+        if (this.settings.llmConnection === 'chatgpt-codex') {
+          if (!this.codexAuth) throw new Error('ChatGPT connection is not ready.');
+          const available = await this.codexAuth.listModels();
+          if (!available.includes(this.settings.codexModel)) {
+            throw new Error('The selected Codex model is unavailable. Choose an available model in Prism settings.');
+          }
+          return new CodexLLMProvider(this.codexAuth, this.settings.codexModel).generate(request);
+        }
         const key = this.app.secretStorage.getSecret('prism-llm-api-key');
         if (!key || !this.settings.llmModel.trim()) {
           throw new Error('Configure an LLM model and API key before asking Prism.');
@@ -185,7 +199,53 @@ export default class PrismPlugin extends Plugin {
     });
     this.addCommand({ id: 'open-chat', name: 'Open Ask view', callback: showChat });
     this.addRibbonIcon('message-square', 'Open Prism Ask', showChat);
-    this.addSettingTab(new PrismSettingTab(this));
+    this.prismSettingTab = new PrismSettingTab(this);
+    this.addSettingTab(this.prismSettingTab);
+  }
+
+  onunload(): void {
+    this.codexAuth?.cancelPending();
+  }
+
+  getCodexStatus(): { accountId?: string; prompt?: DevicePrompt; models: readonly string[] } {
+    return { accountId: this.codexAuth?.accountId, prompt: this.codexPrompt,
+      models: this.codexAuth?.availableModels ?? [] };
+  }
+
+  async startCodexLogin(): Promise<void> {
+    if (!this.codexAuth) throw new Error('ChatGPT connection is not ready.');
+    const prompt = await this.codexAuth.startDeviceLogin();
+    this.codexPrompt = prompt;
+    void prompt.complete.then(async () => {
+      if (this.codexPrompt === prompt) this.codexPrompt = undefined;
+      try { await this.codexAuth?.listModels(true); }
+      catch { new Notice('ChatGPT connected, but Prism could not load available Codex models.'); }
+      new Notice('ChatGPT account connected to Prism.');
+      this.refreshSettingTab();
+    }, () => {
+      if (this.codexPrompt === prompt) this.codexPrompt = undefined;
+      new Notice('ChatGPT authorization did not complete. Try connecting again.');
+      this.refreshSettingTab();
+    });
+  }
+
+  cancelCodexLogin(): void {
+    this.codexPrompt?.cancel();
+    this.codexPrompt = undefined;
+  }
+
+  signOutCodex(): void {
+    this.codexAuth?.signOut();
+    this.codexPrompt = undefined;
+  }
+
+  async refreshCodexModels(): Promise<void> {
+    if (!this.codexAuth) throw new Error('ChatGPT connection is not ready.');
+    await this.codexAuth.listModels(true);
+  }
+
+  private refreshSettingTab(): void {
+    this.prismSettingTab?.display();
   }
 
   getIndexStatus(): { state: 'ready' | 'rebuilding' | 'failed'; sources: number; chunks: number } {
@@ -264,6 +324,17 @@ export default class PrismPlugin extends Plugin {
     this.settings = { ...this.settings, llmModel };
   }
 
+  async setLlmConnection(value: 'api-key' | 'chatgpt-codex'): Promise<void> {
+    await this.savePluginData({ llmConnection: value });
+    this.settings = { ...this.settings, llmConnection: value };
+  }
+
+  async setCodexModel(value: string): Promise<void> {
+    const codexModel = value.trim();
+    await this.savePluginData({ codexModel });
+    this.settings = { ...this.settings, codexModel };
+  }
+
   setEmbeddingApiKey(value: string): void {
     this.app.secretStorage.setSecret('prism-embedding-api-key', value.trim());
   }
@@ -322,7 +393,7 @@ class PrismSettingTab extends PluginSettingTab {
     }
 
     containerEl.createEl('p', {
-      text: 'Remote processing: OpenAI receives Markdown or chunk text for embeddings when enabled, and your query for vector search when a consented vector index exists. For answers, OpenAI receives your query plus retrieved source IDs, chunk IDs, and text. This data leaves your Vault for those requests.',
+      text: 'Remote processing: OpenAI receives Markdown or chunk text for embeddings when enabled, and your query for vector search when a consented vector index exists. For answers, your selected OpenAI connection receives your query plus retrieved source IDs, chunk IDs, and text. API-key answers go to https://api.openai.com/v1/responses; ChatGPT (Codex) answers go to https://chatgpt.com/backend-api/codex/responses. This data leaves your Vault for those requests.',
     });
 
     new Setting(containerEl)
@@ -354,18 +425,70 @@ class PrismSettingTab extends PluginSettingTab {
         }));
 
     new Setting(containerEl)
-      .setName('LLM model')
-      .setDesc('OpenAI model ID used for answers.')
-      .addText((text) => text
-        .setPlaceholder('Model ID')
-        .setValue(this.prism.settings.llmModel)
+      .setName('LLM connection')
+      .setDesc('Choose which account pays for answers. Prism never switches connections after an error.')
+      .addDropdown((dropdown) => dropdown
+        .addOption('api-key', 'OpenAI API key')
+        .addOption('chatgpt-codex', 'ChatGPT (Codex, experimental)')
+        .setValue(this.prism.settings.llmConnection)
         .onChange(async (value) => {
           try {
-            await this.prism.setLlmModel(value);
+            await this.prism.setLlmConnection(value as 'api-key' | 'chatgpt-codex');
+            this.display();
+          } catch { new Notice('Prism could not change the LLM connection.'); }
+        }));
+
+    const codexModels = this.prism.getCodexStatus().models;
+    new Setting(containerEl)
+      .setName(this.prism.settings.llmConnection === 'api-key' ? 'LLM model' : 'Codex model')
+      .setDesc(this.prism.settings.llmConnection === 'api-key' ? 'OpenAI model ID used for answers.'
+        : codexModels.length ? `Available on this account: ${codexModels.join(', ')}`
+          : 'Codex model ID used for answers. Connect to load the available models for this account.')
+      .addText((text) => text
+        .setPlaceholder('Model ID')
+        .setValue(this.prism.settings.llmConnection === 'api-key' ? this.prism.settings.llmModel : this.prism.settings.codexModel)
+        .onChange(async (value) => {
+          try {
+            if (this.prism.settings.llmConnection === 'api-key') await this.prism.setLlmModel(value);
+            else await this.prism.setCodexModel(value);
           } catch {
-            new Notice('Prism could not save the LLM model. Try again.');
+            new Notice('Prism could not save the model. Try again.');
           }
         }));
+
+    if (this.prism.settings.llmConnection === 'chatgpt-codex') {
+      containerEl.createEl('p', { text: 'Experimental Codex compatibility uses a ChatGPT account with Codex access. It uses an interface that can change. Device authorization contacts https://auth.openai.com. You may need to enable device-code sign-in in ChatGPT settings.' });
+      const { accountId, prompt } = this.prism.getCodexStatus();
+      new Setting(containerEl)
+        .setName('ChatGPT account')
+        .setDesc(accountId ? `Saved account: ${accountId}` : prompt ? 'Complete authorization in your browser.' : 'Not connected on this device.')
+        .addButton((button) => button
+          .setButtonText(accountId ? 'Reconnect' : 'Connect')
+          .setDisabled(Boolean(prompt))
+          .onClick(async () => {
+            try { await this.prism.startCodexLogin(); this.display(); }
+            catch { new Notice('Prism could not start ChatGPT authorization.'); }
+          }))
+        .addButton((button) => button
+          .setButtonText('Sign out')
+          .setDisabled(!accountId && !prompt)
+          .onClick(() => { this.prism.signOutCodex(); this.display(); }));
+      if (prompt) {
+        containerEl.createEl('p', { text: `Enter code ${prompt.userCode} at the OpenAI device sign-in page.` });
+        const link = containerEl.createEl('a', { text: 'Open ChatGPT device sign-in', href: prompt.verificationUrl });
+        link.setAttr('target', '_blank');
+        new Setting(containerEl).addButton((button) => button.setButtonText('Cancel sign-in')
+          .onClick(() => { this.prism.cancelCodexLogin(); this.display(); }));
+      }
+      if (accountId) {
+        new Setting(containerEl).setName('Codex models')
+          .setDesc('Load the current model list for this account.')
+          .addButton((button) => button.setButtonText('Refresh models').onClick(async () => {
+            try { await this.prism.refreshCodexModels(); this.display(); }
+            catch { new Notice('Prism could not load Codex models. Try again.'); }
+          }));
+      }
+    }
 
     this.addApiKeySetting('Embedding API key', this.prism.hasEmbeddingApiKey(),
       (value) => this.prism.setEmbeddingApiKey(value));
