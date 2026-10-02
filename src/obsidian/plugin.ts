@@ -1,4 +1,4 @@
-import { Notice, Plugin, PluginSettingTab, Setting, TFile } from 'obsidian';
+import { Modal, Notice, Plugin, PluginSettingTab, Setting, TFile } from 'obsidian';
 import { CitationAnswerer, type CitedAnswer, type SourceCitation } from '../core/application/citation-answerer';
 import { RagPipeline } from '../core/application/rag-pipeline';
 import { SourceRegistry, type SourceRecord } from '../core/index/source-registry';
@@ -195,6 +195,7 @@ export default class PrismPlugin extends Plugin {
       new Notice('Prism could not open the Ask view. Try again.');
     });
     this.addCommand({ id: 'open-chat', name: 'Open Ask view', callback: showChat });
+    this.addCommand({ id: 'rebuild-index', name: 'Rebuild index', callback: () => this.rebuildFromCommand() });
     this.addRibbonIcon('message-square', 'Open Prism Ask', showChat);
     this.prismSettingTab = new PrismSettingTab(this);
     this.addSettingTab(this.prismSettingTab);
@@ -301,6 +302,36 @@ export default class PrismPlugin extends Plugin {
     });
     this.rebuildPromise = rebuild.finally(() => { this.rebuildPromise = undefined; });
     return this.rebuildPromise;
+  }
+
+  rebuildFromCommand(): void | Promise<void> {
+    if (this.rebuildState === 'rebuilding') {
+      new Notice('Prism index rebuild is already in progress.');
+      return;
+    }
+    if (this.settings.allowRemoteEmbeddingIndexing) {
+      new RebuildConfirmModal(this.app, () => this.runRebuild()).open();
+      return;
+    }
+    return this.runRebuild();
+  }
+
+  async runRebuild(): Promise<void> {
+    if (this.rebuildState === 'rebuilding') {
+      new Notice('Prism index rebuild is already in progress.');
+      return;
+    }
+    try {
+      const rebuild = this.rebuildIndex();
+      new Notice('Prism is rebuilding the index from Vault Markdown.');
+      this.refreshSettingTab();
+      await rebuild;
+      new Notice('Prism index rebuilt from Vault Markdown.');
+    } catch {
+      new Notice('Prism could not rebuild the index. Check Vault access, embedding settings, and plugin storage, then retry.');
+    } finally {
+      this.refreshSettingTab();
+    }
   }
 
   async setShowVaultNotice(value: boolean): Promise<void> {
@@ -606,17 +637,7 @@ class PrismSettingTab extends PluginSettingTab {
       .addButton((button) => button
         .setButtonText('Rebuild')
         .setDisabled(status.state === 'rebuilding')
-        .onClick(async () => {
-          try {
-            const rebuild = this.prism.rebuildIndex();
-            this.display();
-            await rebuild;
-            new Notice('Prism index rebuilt from Vault Markdown.');
-          } catch {
-            new Notice('Prism could not rebuild the index. Check Vault access, embedding settings, and plugin storage, then retry.');
-          }
-          this.display();
-        }));
+        .onClick(() => this.prism.runRebuild()));
   }
 
   private addApiKeySetting(name: string, configured: boolean, save: (value: string) => void): void {
@@ -650,5 +671,24 @@ class PrismSettingTab extends PluginSettingTab {
             new Notice('Prism could not clear the API key. Try again.');
           }
         }));
+  }
+}
+
+class RebuildConfirmModal extends Modal {
+  constructor(app: PrismPlugin['app'], private readonly confirm: () => Promise<void>) {
+    super(app);
+  }
+
+  onOpen(): void {
+    this.contentEl.createEl('h2', { text: 'Rebuild Prism index?' });
+    this.contentEl.createEl('p', {
+      text: 'Remote embedding indexing is enabled. Rebuilding sends Markdown chunks from included Vault notes to https://api.openai.com/v1/embeddings to recreate the search index.',
+    });
+    new Setting(this.contentEl)
+      .addButton((button) => button.setButtonText('Cancel').onClick(() => this.close()))
+      .addButton((button) => button.setButtonText('Rebuild').onClick(() => {
+        this.close();
+        return this.confirm();
+      }));
   }
 }

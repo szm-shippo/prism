@@ -55,6 +55,7 @@ async function loadPlugin(savedData, failSave = false, storedSecrets = new Map()
   const openedFiles = [];
   const viewFactories = new Map();
   const commands = [];
+  const modals = [];
   const ribbonIcons = [];
   const leaves = [];
   const revealed = [];
@@ -122,6 +123,12 @@ async function loadPlugin(savedData, failSave = false, storedSecrets = new Map()
         return element;
       },
     };
+  }
+
+  class MockModal {
+    contentEl = new MockElement('div');
+    open() { modals.push(this); this.onOpen(); }
+    close() { this.closed = true; }
   }
 
   class MockSetting {
@@ -198,6 +205,7 @@ async function loadPlugin(savedData, failSave = false, storedSecrets = new Map()
         Plugin: MockPlugin,
         ItemView: MockItemView,
         PluginSettingTab: MockPluginSettingTab,
+        Modal: MockModal,
         Setting: MockSetting,
         Notice: class { constructor(message) { notices.push(message); } },
         TFile: MockTFile,
@@ -236,7 +244,7 @@ async function loadPlugin(savedData, failSave = false, storedSecrets = new Map()
   const plugin = new module.exports.default();
   await plugin.onload();
   return { manifest, plugin, tabs, writes, notices, listeners, storedSecrets, MockPlugin, MockTFile,
-    requests, openedFiles, commands, ribbonIcons, leaves, revealed };
+    requests, openedFiles, commands, ribbonIcons, leaves, revealed, modals };
 }
 
 test('Ask command opens one view and submits a query through RAG with actionable citations', async () => {
@@ -762,6 +770,74 @@ test('Advanced rebuild reports failure and allows a retry', async () => {
   await tabs[0].containerEl.children.find((child) => child.name === 'Rebuild index').button.click();
   assert.equal(plugin.getIndexStatus().state, 'ready');
   assert.equal(plugin.getIndexStatus().sources, 1);
+});
+
+test('rebuild command indexes Vault Markdown locally, blocks duplicate runs, and reports retryable failure', async () => {
+  const { plugin, commands, MockTFile, notices, requests, modals } = await loadPlugin(null);
+  const command = commands.find((item) => item.id === 'rebuild-index');
+  assert.equal(command.name, 'Rebuild index');
+  const file = new MockTFile('note.md', '# Vault note');
+  plugin.app.vault.files = [file];
+  const read = plugin.app.vault.read;
+  let release;
+  let signalRead;
+  const readStarted = new Promise((resolve) => { signalRead = resolve; });
+  plugin.app.vault.read = () => new Promise((resolve) => {
+    release = () => resolve(file.content);
+    signalRead();
+  });
+  const pending = command.callback();
+  assert.equal(plugin.getIndexStatus().state, 'rebuilding');
+  assert.match(notices.at(-1), /rebuilding/);
+  await readStarted;
+  await command.callback();
+  assert.match(notices.at(-1), /already in progress/);
+  release();
+  await pending;
+  assert.equal(plugin.getIndexStatus().state, 'ready');
+  assert.equal((await plugin.fullTextSearch.search('Vault', 5)).length, 1);
+  assert.equal(file.content, '# Vault note');
+  assert.deepEqual(requests, []);
+  assert.equal(modals.length, 0);
+
+  plugin.app.vault.read = async () => { throw new Error('private note contents'); };
+  await command.callback();
+  assert.equal(plugin.getIndexStatus().state, 'failed');
+  assert.match(notices.at(-1), /could not rebuild/);
+  assert.doesNotMatch(notices.at(-1), /private note contents/);
+  plugin.app.vault.read = read;
+  await command.callback();
+  assert.equal(plugin.getIndexStatus().state, 'ready');
+});
+
+test('rebuild command requires confirmation before consented Markdown chunks reach OpenAI', async () => {
+  const { plugin, commands, MockTFile, notices, requests, modals } = await loadPlugin(null);
+  const command = commands.find((item) => item.id === 'rebuild-index');
+  await plugin.setEmbeddingModel('test-embedding-model');
+  plugin.setEmbeddingApiKey('test-key');
+  await plugin.setAllowRemoteEmbeddingIndexing(true);
+  const file = new MockTFile('note.md', '# Vault note');
+  plugin.app.vault.files = [file];
+
+  command.callback();
+  assert.equal(modals.length, 1);
+  const disclosure = modals[0].contentEl.children.find((child) => child.tag === 'p').textContent;
+  assert.match(disclosure, /Markdown chunks/);
+  assert.match(disclosure, /https:\/\/api\.openai\.com\/v1\/embeddings/);
+  assert.equal(requests.length, 0);
+  modals[0].contentEl.children.find((child) => child.buttons).buttons[0].click();
+  assert.equal(modals[0].closed, true);
+  assert.equal(requests.length, 0);
+
+  command.callback();
+  await modals[1].contentEl.children.find((child) => child.buttons).buttons[1].click();
+  assert.equal(modals[1].closed, true);
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].url, 'https://api.openai.com/v1/embeddings');
+  assert.deepEqual(JSON.parse(requests[0].body).input, ['# Vault note']);
+  assert.equal(plugin.getIndexStatus().state, 'ready');
+  assert.match(notices.at(-1), /rebuilt from Vault Markdown/);
+  assert.equal(file.content, '# Vault note');
 });
 
 test('remote indexing sends only changed chunks after explicit opt-in and stops after opt-out', async () => {
