@@ -5,7 +5,8 @@ import type { CodexAuth } from './codex-auth';
 const RESPONSES_URL = 'https://chatgpt.com/backend-api/codex/responses';
 
 function errorForStatus(status: number): LLMProviderError {
-  if (status === 401 || status === 403) return new LLMProviderError('authentication');
+  if (status === 401) return new LLMProviderError('authentication');
+  if (status === 403) return new LLMProviderError('invalid_request');
   if (status === 429) return new LLMProviderError('rate_limit');
   if (status >= 500) return new LLMProviderError('unavailable');
   return new LLMProviderError('invalid_request');
