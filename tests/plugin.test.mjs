@@ -486,6 +486,20 @@ test('query flows from local retrieval to a cited answer without remote embeddin
   assert.equal(requests.length, 1);
 });
 
+test('a Japanese Ask question retrieves its dated Vault note without remote embedding', async () => {
+  const { plugin, listeners, MockTFile, requests } = await loadPlugin(null);
+  await plugin.setLlmModel('answer-model');
+  plugin.setLlmApiKey('test-key');
+  const file = new MockTFile('library.md', '# 夜間開館\n6月12日には空調設備が停止した。貸出・返却窓口は21時まで継続した。');
+  plugin.app.vault.files = [file];
+  await listeners.get('create')(file);
+
+  const answer = await plugin.answerQuery('6月12日に何が起こり、どのサービスが継続した？');
+  assert.equal(answer.citations[0]?.path, 'library.md');
+  assert.deepEqual(requests.map((request) => request.url), ['https://api.openai.com/v1/responses']);
+  assert.match(requests[0].body, /6月12日には空調設備が停止した/);
+});
+
 test('query uses a consented vector index and discloses the query embedding request', async () => {
   const { plugin, listeners, MockTFile, requests, tabs } = await loadPlugin(null);
   await plugin.setEmbeddingModel('embedding-model');

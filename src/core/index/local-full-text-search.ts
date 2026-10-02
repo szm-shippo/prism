@@ -30,6 +30,21 @@ function occurrences(content: string, term: string): number {
   return count;
 }
 
+function searchTerms(query: string): string[] {
+  const terms = new Set<string>();
+  for (const segment of query.match(/[\p{L}\p{N}_]+/gu) ?? []) {
+    terms.add(segment);
+    if (/^[\x00-\x7f]+$/u.test(segment)) continue;
+    const characters = [...segment];
+    for (let length = 2; length <= Math.min(4, characters.length); length += 1) {
+      for (let start = 0; start + length <= characters.length; start += 1) {
+        terms.add(characters.slice(start, start + length).join(''));
+      }
+    }
+  }
+  return [...terms];
+}
+
 export class LocalFullTextSearch implements FullTextSearch {
   private constructor(
     private readonly storage: FullTextSearchStorage,
@@ -79,7 +94,7 @@ export class LocalFullTextSearch implements FullTextSearch {
     if (!Number.isSafeInteger(limit) || limit < 0) throw new Error('A non-negative search limit is required.');
     const normalized = query.trim().toLowerCase();
     if (!normalized || limit === 0) return [];
-    const terms = [...new Set(normalized.split(/\s+/u))];
+    const terms = searchTerms(normalized);
     return this.entries.flatMap((entry) => {
       const content = entry.content.toLowerCase();
       const score = occurrences(content, normalized) * 2 +
