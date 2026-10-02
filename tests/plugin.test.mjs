@@ -419,6 +419,14 @@ test('Ask view validates input, shows loading and safe errors, then renders answ
   assert.match(status.textContent, /Check provider settings, indexing, and network/);
   assert.doesNotMatch(status.textContent, /private note contents/);
   assert.equal(button.disabled, false);
+  plugin.answerQuery = async () => { throw new Error('Connect a ChatGPT account in Prism settings.'); };
+  await form.submit();
+  assert.match(status.textContent, /Connect or reconnect your ChatGPT account/);
+  plugin.answerQuery = async () => {
+    throw new Error('The selected Codex model is unavailable. Choose an available model in Prism settings.');
+  };
+  await form.submit();
+  assert.match(status.textContent, /selected Codex model is unavailable/);
   plugin.answerQuery = async () => ({ content: '<img src=x onerror=alert(1)>', citations: [{
     sourceId: 'one', chunkId: 'one', path: '<b>source.md', startLine: 2, endLine: 3,
   }] });
