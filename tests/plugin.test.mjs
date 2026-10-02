@@ -325,7 +325,7 @@ test('connection test sends only its disclosed fixed prompt and reports success 
     accessToken: 'test-access', refreshToken: 'test-refresh', accountId: 'account-1',
     expiresAt: Date.now() + 3600_000,
   })]]);
-  const { plugin, tabs, requests, writes } = await loadPlugin(null, false, secrets);
+  const { plugin, tabs, requests, writes, notices } = await loadPlugin(null, false, secrets);
   await plugin.setLlmConnection('chatgpt-codex');
   tabs[0].display();
   const setting = tabs[0].containerEl.children.find((child) => child.name === 'Test ChatGPT connection');
@@ -337,7 +337,8 @@ test('connection test sends only its disclosed fixed prompt and reports success 
   assert.deepEqual(structuredClone(JSON.parse(sent[0].body).input), [{ role: 'user', content: 'Reply with OK.' }]);
   assert.equal(requests.some((request) => request.url === 'https://api.openai.com/v1/responses'), false);
   assert.equal(tabs[0].containerEl.children.find((child) => child.attributes?.role === 'status').text,
-    'Connection succeeded.');
+    'Success: ChatGPT (Codex) responded to the connection test.');
+  assert.ok(notices.includes('Success: ChatGPT (Codex) responded to the connection test.'));
   assert.doesNotMatch(JSON.stringify(writes), /test-access|test-refresh|Reply with OK|Connection succeeded/);
 });
 
@@ -348,13 +349,15 @@ test('connection test shows safe failure categories and disables the button with
       accessToken: 'test-access', refreshToken: 'test-refresh', accountId: 'account-1',
       expiresAt: Date.now() + 3600_000,
     })]]);
-    const { plugin, tabs } = await loadPlugin(null, false, secrets,
+    const { plugin, tabs, notices } = await loadPlugin(null, false, secrets,
       (request) => request.url.includes('/codex/responses') ? { status, text: 'private token and note' } : undefined);
     await plugin.setLlmConnection('chatgpt-codex');
     tabs[0].display();
     await tabs[0].containerEl.children.find((child) => child.name === 'Test ChatGPT connection').button.click();
     const message = tabs[0].containerEl.children.find((child) => child.attributes?.role === 'status').text;
+    assert.match(message, /^Failed:/);
     assert.match(message, expected);
+    assert.ok(notices.includes(message));
     assert.doesNotMatch(message, /private token and note|test-access|account-1/);
   }
   const missing = await loadPlugin({ llmConnection: 'chatgpt-codex' });

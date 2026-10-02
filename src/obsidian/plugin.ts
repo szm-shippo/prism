@@ -535,20 +535,22 @@ class PrismSettingTab extends PluginSettingTab {
             let result: string;
             try {
               await this.prism.testCodexConnection();
-              result = 'Connection succeeded.';
+              result = 'Success: ChatGPT (Codex) responded to the connection test.';
             } catch (error) {
-              result = error instanceof LLMProviderError
+              const reason = error instanceof LLMProviderError
                 ? ({ authentication: 'Authentication failed. Reconnect your ChatGPT account.',
                     rate_limit: 'The account is rate limited or has reached its quota.',
                     unavailable: 'The Codex service or network is unavailable. Try again.',
                     invalid_request: 'The selected model or account is not permitted to make this request.',
                     unknown: 'The Codex response was incomplete or invalid.' }[error.code])
                 : 'Connection test could not run. Check the selected model and try again.';
+              result = `Failed: ${reason}`;
             }
             if (this.activeConnectionTest !== run ||
                 this.prism.settings.llmConnection !== 'chatgpt-codex') return;
             this.activeConnectionTest = undefined;
             this.connectionTestResult = result;
+            new Notice(result);
             this.display();
           }));
       if (this.connectionTestResult) {
