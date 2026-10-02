@@ -80,6 +80,7 @@ async function loadPlugin(savedData, failSave = false, storedSecrets = new Map()
   }
 
   class MockPlugin {
+    manifest = manifest;
     app = { workspace: {
       getLeaf() { const leaf = new MockLeaf(); leaves.push(leaf); return leaf; },
       getLeavesOfType(type) { return leaves.filter((leaf) => leaf.state?.type === type); },
@@ -114,7 +115,12 @@ async function loadPlugin(savedData, failSave = false, storedSecrets = new Map()
     containerEl = {
       children: [],
       empty() { this.children = []; },
-      createEl(tag, options) { this.children.push({ tag, text: options.text }); },
+      createEl(tag, options) {
+        const element = { tag, text: options.text, attributes: {},
+          setAttr(name, value) { this.attributes[name] = value; } };
+        this.children.push(element);
+        return element;
+      },
     };
   }
 
@@ -129,6 +135,17 @@ async function loadPlugin(savedData, failSave = false, storedSecrets = new Map()
       };
       callback(toggle);
       this.toggle = toggle;
+      return this;
+    }
+    addDropdown(callback) {
+      const dropdown = {
+        options: new Map(),
+        addOption(value, label) { this.options.set(value, label); return this; },
+        setValue(value) { this.value = value; return this; },
+        onChange(handler) { this.change = handler; return this; },
+      };
+      callback(dropdown);
+      this.dropdown = dropdown;
       return this;
     }
     addText(callback) {
@@ -165,6 +182,7 @@ async function loadPlugin(savedData, failSave = false, storedSecrets = new Map()
       };
       callback(button);
       this.button = button;
+      (this.buttons ??= []).push(button);
       return this;
     }
   }
@@ -185,6 +203,16 @@ async function loadPlugin(savedData, failSave = false, storedSecrets = new Map()
         TFile: MockTFile,
         requestUrl: async (request) => {
           requests.push(request);
+          if (request.url.includes('/codex/models')) return { status: 200, text: JSON.stringify({
+            models: [{ slug: 'codex-model', visibility: 'list', supported_in_api: true }],
+          }) };
+          if (request.url.includes('/codex/responses')) {
+            const messages = JSON.parse(request.body).input;
+            const reference = messages.find((message) => message.content.startsWith('Reference material:\n'));
+            const context = JSON.parse(reference.content.slice('Reference material:\n'.length));
+            return { status: 200, text: `data: ${JSON.stringify({ type: 'response.output_text.delta',
+              delta: `Grounded answer [cite:${context[0].chunkId}]` })}\n\ndata: {"type":"response.completed"}\n\n` };
+          }
           if (request.url.endsWith('/responses')) {
             const messages = JSON.parse(request.body).input;
             const reference = messages.find((message) => message.content.startsWith('Reference material:\n'));
@@ -254,6 +282,39 @@ test('Ask command opens one view and submits a query through RAG with actionable
   await ribbonIcons[0].callback();
   assert.equal(leaves.filter((leaf) => leaf.state?.type === 'prism-chat').length, 1);
   assert.equal(revealed.length, 2);
+});
+
+test('ChatGPT selection never charges the configured API key after missing OAuth credentials', async () => {
+  const { plugin, listeners, MockTFile, requests, storedSecrets, writes } = await loadPlugin(null);
+  plugin.setLlmApiKey('configured-api-key');
+  await plugin.setLlmModel('api-model');
+  await plugin.setLlmConnection('chatgpt-codex');
+  const file = new MockTFile('facts.md', '# Local fact');
+  plugin.app.vault.files = [file];
+  await listeners.get('create')(file);
+  await assert.rejects(plugin.answerQuery('Local fact'));
+  assert.equal(requests.length, 0);
+  assert.equal(storedSecrets.get('prism-llm-api-key'), 'configured-api-key');
+  assert.equal(writes.at(-1).llmConnection, 'chatgpt-codex');
+});
+
+test('ChatGPT account answers a local RAG query with citations and no API key', async () => {
+  const accessToken = 'test-access';
+  const secrets = new Map([['prism-codex-credential', JSON.stringify({
+    accessToken, refreshToken: 'test-refresh', accountId: 'account-1', expiresAt: Date.now() + 3600_000,
+  })]]);
+  const { plugin, listeners, MockTFile, requests, writes } = await loadPlugin(null, false, secrets);
+  await plugin.setLlmConnection('chatgpt-codex');
+  await plugin.setCodexModel('codex-model');
+  const file = new MockTFile('facts.md', '# Local fact');
+  plugin.app.vault.files = [file];
+  await listeners.get('create')(file);
+  const answer = await plugin.answerQuery('Local fact');
+  assert.match(answer.content, /Grounded answer/);
+  assert.equal(answer.citations.length, 1);
+  assert.equal(requests.filter((request) => request.url.includes('/codex/responses')).length, 1);
+  assert.equal(requests.some((request) => request.url === 'https://api.openai.com/v1/responses'), false);
+  assert.doesNotMatch(JSON.stringify(writes), /test-access|test-refresh|Grounded answer/);
 });
 
 test('Ask view validates input, shows loading and safe errors, then renders answer as text', async () => {

@@ -5,6 +5,8 @@ export interface PluginSettings {
   allowRemoteEmbeddingIndexing: boolean;
   embeddingModel: string;
   llmModel: string;
+  llmConnection: 'api-key' | 'chatgpt-codex';
+  codexModel: string;
   excludedPaths: string[];
 }
 
@@ -13,6 +15,8 @@ const DEFAULT_SETTINGS: PluginSettings = {
   allowRemoteEmbeddingIndexing: false,
   embeddingModel: '',
   llmModel: '',
+  llmConnection: 'api-key',
+  codexModel: 'gpt-5.4',
   excludedPaths: [],
 };
 
@@ -34,6 +38,8 @@ export function loadSettings(data: unknown): PluginSettings {
     allowRemoteEmbeddingIndexing: saved.allowRemoteEmbeddingIndexing === true,
     embeddingModel: typeof saved.embeddingModel === 'string' ? saved.embeddingModel : DEFAULT_SETTINGS.embeddingModel,
     llmModel: typeof saved.llmModel === 'string' ? saved.llmModel : DEFAULT_SETTINGS.llmModel,
+    llmConnection: saved.llmConnection === 'chatgpt-codex' ? 'chatgpt-codex' : 'api-key',
+    codexModel: typeof saved.codexModel === 'string' ? saved.codexModel : DEFAULT_SETTINGS.codexModel,
     excludedPaths,
   };
 }

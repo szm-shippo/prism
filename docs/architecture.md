@@ -79,3 +79,11 @@ Provider 設定 UI はモデル ID をプラグイン設定データへ保存し
 ## Ask View
 
 `PrismChatView` は Obsidian の View として登録し、コマンドとリボンから同じ View を開く。質問を `PrismPlugin.answerQuery` に渡し、回答と出典のパス・行範囲を表示する。回答中の引用番号と出典一覧は、マウス・キーボード・タッチで操作できるボタンとして表示し、`PrismPlugin.openCitation` を呼び出す。処理中は二重送信を止め、失敗時は秘密情報を含む可能性のある例外本文を画面に出さない。回答履歴と Markdown への保存は行わない。
+
+## ChatGPT (Codex) 接続
+
+`src/obsidian/codex-auth.ts` は Codex Device Code の取得、承認待ち、認可コード交換、トークン更新とアカウント別モデル一覧の取得を担当する。Obsidian の `requestUrl` を使い、Node.js のローカル HTTP リスナーに依存しない。Device Code の承認待ちには期限とキャンセルを設け、取り消した試行から資格情報を保存しない。応答に ID トークンが含まれる場合は OpenAI の JWKS で署名、発行者、クライアント ID、期限を確認する。アクセストークン、更新トークン、アカウント ID、有効期限はデバイスごとの Secret Storage にまとめて保存し、通常のプラグイン設定データや Vault Markdown に置かない。更新時に別アカウントの ID が返れば既存の資格情報を置き換えない。
+
+設定の `llmConnection` は回答に使う接続を明示し、既定は従来の API キー接続とする。ChatGPT 接続が失敗しても API キーへ自動的に切り替えない。Embedding とベクトル検索の遠隔送信は引き続き専用 API キーと明示的な同意に従う。
+
+`src/obsidian/codex-llm-provider.ts` は既存の LLMProvider 境界を実装し、回答に必要な質問と選択済み context を `https://chatgpt.com/backend-api/codex/responses` へ送る。SSE の `response.completed` を受け取るまで回答を成功扱いにしない。これは Codex との実験的な第三者互換経路で、公開の Sign in with ChatGPT Responses API 契約とは異なる。OpenAI 側の変更で動作しなくなる可能性があるため、利用者向け設定と README に送信先と制約を示す。
