@@ -64,7 +64,7 @@ Provider 設定 UI はモデル ID をプラグイン設定データへ保存し
 
 ## Source Citation
 
-`CitationAnswerer` は検索で使った chunk ID と source ID を LLM context に渡し、回答中の `[cite:CHUNK_ID]` を出典に変換する。出典のパスと行範囲は回答生成後に Chunk Registry と Source Registry から取得する。入力にない chunk、source ID が一致しない chunk、Vault に存在しないパスの marker は出典として採用しない。戻り値は回答文と構造化された出典の組である。引用元を開く際は citation に保存された古いパスを使わず、source ID から現在の Vault パスを調べる。Chat UI での遷移操作は後続 Issue が担当する。
+`CitationAnswerer` は検索で使った chunk ID と source ID を LLM context に渡し、回答中の `[cite:CHUNK_ID]` を出典に変換する。出典のパスと行範囲は回答生成後に Chunk Registry と Source Registry から取得する。入力にない chunk、source ID が一致しない chunk、Vault に存在しないパスの marker は出典として採用しない。戻り値は回答文と構造化された出典の組である。引用元を開く際は citation に保存された古いパスを使わず、source ID から現在の Vault パスを調べる。Chat UI は引用番号と出典一覧をボタンで表示し、この source ID による遷移を呼び出す。
 
 ## RAG Pipeline
 
@@ -78,4 +78,4 @@ Provider 設定 UI はモデル ID をプラグイン設定データへ保存し
 
 ## Ask View
 
-`PrismChatView` は Obsidian の View として登録し、コマンドとリボンから同じ View を開く。質問を `PrismPlugin.answerQuery` に渡し、回答と出典のパス・行範囲を文字列として表示する。処理中は二重送信を止め、失敗時は秘密情報を含む可能性のある例外本文を画面に出さない。回答履歴と Markdown への保存は行わず、出典を開く UI 操作は後続 Issue #36 が担当する。
+`PrismChatView` は Obsidian の View として登録し、コマンドとリボンから同じ View を開く。質問を `PrismPlugin.answerQuery` に渡し、回答と出典のパス・行範囲を表示する。回答中の引用番号と出典一覧は、マウス・キーボード・タッチで操作できるボタンとして表示し、`PrismPlugin.openCitation` を呼び出す。処理中は二重送信を止め、失敗時は秘密情報を含む可能性のある例外本文を画面に出さない。回答履歴と Markdown への保存は行わない。

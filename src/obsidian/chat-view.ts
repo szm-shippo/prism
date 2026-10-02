@@ -1,5 +1,5 @@
 import { ItemView, type WorkspaceLeaf } from 'obsidian';
-import type { CitedAnswer } from '../core/application/citation-answerer';
+import type { CitedAnswer, SourceCitation } from '../core/application/citation-answerer';
 
 export const CHAT_VIEW_TYPE = 'prism-chat';
 
@@ -7,7 +7,11 @@ export class PrismChatView extends ItemView {
   private pending = false;
   private requestId = 0;
 
-  constructor(leaf: WorkspaceLeaf, private readonly answer: (query: string) => Promise<CitedAnswer>) {
+  constructor(
+    leaf: WorkspaceLeaf,
+    private readonly answer: (query: string) => Promise<CitedAnswer>,
+    private readonly openCitation: (citation: SourceCitation) => Promise<boolean>,
+  ) {
     super(leaf);
   }
 
@@ -67,14 +71,17 @@ export class PrismChatView extends ItemView {
     try {
       const answer = await this.answer(question);
       if (request !== this.requestId) return;
-      response.textContent = answer.content;
+      this.renderAnswer(response, status, answer);
       if (answer.citations.length > 0) {
         sources.createEl('h3', { text: 'Sources' });
         const list = sources.createEl('ol');
         for (const citation of answer.citations) {
-          list.createEl('li', {
+          const item = list.createEl('li');
+          const link = item.createEl('button', {
             text: `${citation.path} (lines ${citation.startLine}–${citation.endLine})`,
           });
+          link.type = 'button';
+          link.addEventListener('click', () => this.openSource(citation, status));
         }
       }
       status.textContent = 'Answer ready.';
@@ -87,6 +94,34 @@ export class PrismChatView extends ItemView {
         this.pending = false;
         button.disabled = false;
       }
+    }
+  }
+
+  private renderAnswer(response: HTMLDivElement, status: HTMLElement, answer: CitedAnswer): void {
+    const marker = /\[\^(\d+)\]/gu;
+    let position = 0;
+    for (const match of answer.content.matchAll(marker)) {
+      const index = Number(match[1]) - 1;
+      const citation = answer.citations[index];
+      if (!citation) continue;
+      response.createEl('span', { text: answer.content.slice(position, match.index) });
+      const link = response.createEl('button', {
+        text: match[0],
+        attr: { 'aria-label': `Open source ${citation.path}, lines ${citation.startLine}–${citation.endLine}` },
+      });
+      link.type = 'button';
+      link.addEventListener('click', () => this.openSource(citation, status));
+      position = match.index + match[0].length;
+    }
+    response.createEl('span', { text: answer.content.slice(position) });
+  }
+
+  private async openSource(citation: SourceCitation, status: HTMLElement): Promise<void> {
+    try {
+      status.textContent = await this.openCitation(citation)
+        ? 'Source opened.' : 'Source is unavailable. Check whether the note was moved, deleted, or excluded.';
+    } catch {
+      status.textContent = 'Could not open the source. Try again.';
     }
   }
 }

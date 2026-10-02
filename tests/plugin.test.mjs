@@ -27,6 +27,7 @@ class MockElement {
   addEventListener(name, callback) { this.listeners.set(name, callback); }
   focus() { this.focused = true; }
   submit() { return this.listeners.get('submit')({ preventDefault() {} }); }
+  click() { return this.listeners.get('click')?.(); }
 }
 
 function findElement(root, predicate) {
@@ -36,6 +37,10 @@ function findElement(root, predicate) {
     if (found) return found;
   }
   return undefined;
+}
+
+function visibleText(element) {
+  return element.textContent + element.children.map(visibleText).join('');
 }
 
 async function loadPlugin(savedData, failSave = false, storedSecrets = new Map()) {
@@ -203,8 +208,9 @@ async function loadPlugin(savedData, failSave = false, storedSecrets = new Map()
     requests, openedFiles, commands, ribbonIcons, leaves, revealed };
 }
 
-test('Ask command opens one view and submits a query through RAG with visible citations', async () => {
-  const { plugin, listeners, MockTFile, commands, ribbonIcons, leaves, revealed, requests, writes } =
+test('Ask command opens one view and submits a query through RAG with actionable citations', async () => {
+  const { plugin, listeners, MockTFile, commands, ribbonIcons, leaves, revealed, requests, writes,
+    openedFiles } =
     await loadPlugin(null);
   await plugin.setLlmModel('answer-model');
   plugin.setLlmApiKey('test-key');
@@ -222,14 +228,31 @@ test('Ask command opens one view and submits a query through RAG with visible ci
   const form = findElement(view.contentEl, (element) => element.tag === 'form');
   input.value = 'Local';
   await form.submit();
-  assert.equal(view.contentEl.children.at(-2).textContent, 'Grounded answer [^1]');
+  assert.equal(visibleText(view.contentEl.children.at(-2)), 'Grounded answer [^1]');
+  const inline = findElement(view.contentEl.children.at(-2), (element) => element.tag === 'button');
+  assert.equal(inline.type, 'button');
+  assert.match(inline.attributes['aria-label'], /Open source facts\.md, lines 1–1/);
+  await inline.click();
+  assert.equal(openedFiles.at(-1), file);
   const citation = findElement(view.contentEl, (element) => element.tag === 'li');
-  assert.match(citation.textContent, /facts\.md \(lines 1–1\)/u);
+  const sourceButton = findElement(citation, (element) => element.tag === 'button');
+  assert.match(sourceButton.textContent, /facts\.md \(lines 1–1\)/u);
+  assert.equal(sourceButton.type, 'button');
+  file.path = 'moved.md';
+  await plugin.sourceRegistry.movePaths('facts.md', 'moved.md');
+  await sourceButton.click();
+  assert.equal(openedFiles.at(-1), file);
+  assert.equal(openedFiles.length, 2);
+  plugin.app.vault.files = [];
+  await inline.click();
+  assert.match(findElement(view.contentEl, (element) => element.attributes?.role === 'status').textContent,
+    /Source is unavailable/);
+  assert.equal(openedFiles.length, 2);
   assert.equal(requests.length, 1);
   assert.equal(file.content, '# Local fact');
   assert.doesNotMatch(JSON.stringify(writes), /Grounded answer/);
   await ribbonIcons[0].callback();
-  assert.equal(leaves.length, 1);
+  assert.equal(leaves.filter((leaf) => leaf.state?.type === 'prism-chat').length, 1);
   assert.equal(revealed.length, 2);
 });
 
@@ -264,10 +287,29 @@ test('Ask view validates input, shows loading and safe errors, then renders answ
     sourceId: 'one', chunkId: 'one', path: '<b>source.md', startLine: 2, endLine: 3,
   }] });
   await form.submit();
-  assert.equal(view.contentEl.children.at(-2).textContent, '<img src=x onerror=alert(1)>');
+  assert.equal(visibleText(view.contentEl.children.at(-2)), '<img src=x onerror=alert(1)>');
   assert.equal(findElement(view.contentEl, (element) => element.tag === 'img'), undefined);
-  assert.match(findElement(view.contentEl, (element) => element.tag === 'li').textContent, /<b>source\.md/);
+  assert.match(visibleText(findElement(view.contentEl, (element) => element.tag === 'li')), /<b>source\.md/);
   assert.equal(status.textContent, 'Answer ready.');
+});
+
+test('citation open errors remain safe in the Ask view', async () => {
+  const { plugin, commands, leaves } = await loadPlugin(null);
+  await commands.find((command) => command.id === 'open-chat').callback();
+  const view = leaves[0].view;
+  plugin.answerQuery = async () => ({ content: 'Answer [^1] and [^9]', citations: [{
+    sourceId: 'source', chunkId: 'chunk', path: 'note.md', startLine: 1, endLine: 2,
+  }] });
+  plugin.openCitation = async () => { throw new Error('private note contents'); };
+  findElement(view.contentEl, (element) => element.tag === 'textarea').value = 'Question';
+  await findElement(view.contentEl, (element) => element.tag === 'form').submit();
+  const answer = view.contentEl.children.at(-2);
+  assert.equal(visibleText(answer), 'Answer [^1] and [^9]');
+  assert.equal(answer.children.filter((child) => child.tag === 'button').length, 1);
+  await findElement(answer, (element) => element.tag === 'button').click();
+  const status = findElement(view.contentEl, (element) => element.attributes?.role === 'status');
+  assert.equal(status.textContent, 'Could not open the source. Try again.');
+  assert.doesNotMatch(status.textContent, /private note contents/);
 });
 
 test('citation opens the current Markdown path after a move and ignores missing sources', async () => {
