@@ -26,6 +26,8 @@ export interface DevicePrompt {
   cancel(): void;
 }
 
+export class CodexModelListError extends Error {}
+
 function record(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid authentication response.');
   return value as Record<string, unknown>;
@@ -263,22 +265,26 @@ export class CodexAuth {
         return await this.transport({ url: `https://chatgpt.com/backend-api/codex/models?client_version=${encodeURIComponent(this.clientVersion)}`,
           method: 'GET', headers: { Authorization: `Bearer ${token}`, 'ChatGPT-Account-Id': accountId,
             originator: 'prism' }, throw: false });
-      } catch { throw new Error('Codex model list is unavailable.'); }
+      } catch { throw new CodexModelListError('Could not load Codex models: connection failed.'); }
     };
     let response = await query(access.token, access.accountId);
     if (response.status === 401) {
       const renewed = await this.refreshAfterUnauthorized(access.token);
       response = await query(renewed.token, renewed.accountId);
     }
-    if (response.status < 200 || response.status >= 300) throw new Error('Codex model list is unavailable.');
-    const models = parseJson(response.text).models;
-    if (!Array.isArray(models)) throw new Error('Codex model list is invalid.');
+    if (response.status < 200 || response.status >= 300) {
+      throw new CodexModelListError(`Could not load Codex models: ChatGPT returned HTTP ${response.status}.`);
+    }
+    let models: unknown;
+    try { models = parseJson(response.text).models; }
+    catch { throw new CodexModelListError('Could not load Codex models: invalid response.'); }
+    if (!Array.isArray(models)) throw new CodexModelListError('Could not load Codex models: invalid response.');
     const available = models.filter((item): item is Record<string, unknown> =>
       Boolean(item && typeof item === 'object' && !Array.isArray(item)))
-      .filter((item) => item.visibility === 'list' && item.supported_in_api === true)
+      .filter((item) => item.visibility === 'list')
       .map((item) => item.slug)
       .filter((slug): slug is string => typeof slug === 'string' && slug.length > 0);
-    if (available.length === 0) throw new Error('No Codex models are available to this account.');
+    if (available.length === 0) throw new CodexModelListError('Could not load Codex models: no listed models.');
     this.models = available;
     return available;
   }

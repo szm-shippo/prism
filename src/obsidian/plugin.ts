@@ -13,7 +13,7 @@ import { isExcludedPath, parseExcludedPaths } from '../core/index/exclusion-rule
 import { SourceEventHandler } from './source-events';
 import { OpenAIEmbeddingProvider } from './openai-embedding-provider';
 import { OpenAILLMProvider } from './openai-llm-provider';
-import { CodexAuth, type DevicePrompt } from './codex-auth';
+import { CodexAuth, CodexModelListError, type DevicePrompt } from './codex-auth';
 import { CodexLLMProvider } from './codex-llm-provider';
 import { LLMProviderError } from '../core/provider/llm-provider';
 import { CHAT_VIEW_TYPE, PrismChatView } from './chat-view';
@@ -218,7 +218,8 @@ export default class PrismPlugin extends Plugin {
       if (this.codexPrompt === prompt) this.codexPrompt = undefined;
       this.prismSettingTab?.invalidateConnectionTest();
       try { await this.codexAuth?.listModels(true); }
-      catch { new Notice('ChatGPT connected, but Prism could not load available Codex models.'); }
+      catch (error) { new Notice(error instanceof CodexModelListError
+        ? error.message : 'ChatGPT connected, but Prism could not load available Codex models.'); }
       new Notice('ChatGPT account connected to Prism.');
       this.refreshSettingTab();
     }, () => {
@@ -508,10 +509,11 @@ class PrismSettingTab extends PluginSettingTab {
       }
       if (accountId) {
         new Setting(containerEl).setName('Codex models')
-          .setDesc('Load the current model list for this account.')
+          .setDesc('Sends the OAuth token to chatgpt.com to load listed model names. No Vault content is sent. Use Test ChatGPT connection to verify the selected model.')
           .addButton((button) => button.setButtonText('Refresh models').onClick(async () => {
             try { await this.prism.refreshCodexModels(); this.display(); }
-            catch { new Notice('Prism could not load Codex models. Try again.'); }
+            catch (error) { new Notice(error instanceof CodexModelListError
+              ? error.message : 'Prism could not load Codex models. Try again.'); }
           }));
       }
       new Setting(containerEl)

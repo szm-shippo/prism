@@ -332,7 +332,7 @@ test('ChatGPT Ask sends the selected model when the optional model list is unava
   const file = new MockTFile('library.md', '# 夜間開館\n6月12日には空調設備が停止した。');
   plugin.app.vault.files = [file];
   await listeners.get('create')(file);
-  await assert.rejects(plugin.refreshCodexModels(), /unavailable/);
+  await assert.rejects(plugin.refreshCodexModels(), /ChatGPT returned HTTP 503/);
 
   const answer = await plugin.answerQuery('6月12日');
   assert.equal(answer.citations[0]?.path, 'library.md');

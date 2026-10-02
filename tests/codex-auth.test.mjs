@@ -135,16 +135,29 @@ test('refresh rotates the saved token and rejects an account switch', async () =
   assert.equal(auth.connected, false);
 });
 
-test('model catalog includes only models the authorized account can select', async () => {
+test('model catalog includes listed models even when supported_in_api is absent or false', async () => {
   const { auth, secrets, calls } = harness(() => ({ status: 200,
     text: JSON.stringify({ models: [
       { slug: 'available-model', visibility: 'list', supported_in_api: true },
       { slug: 'hidden-model', visibility: 'hide', supported_in_api: true },
       { slug: 'unsupported-model', visibility: 'list', supported_in_api: false },
+      { slug: 'new-model', visibility: 'list' },
     ] }) }));
   secrets.set('prism-codex-credential', JSON.stringify({ accessToken: token('account-1'),
     refreshToken: 'refresh-1', accountId: 'account-1', expiresAt: Date.now() + 3600_000 }));
-  assert.deepEqual(structuredClone(await auth.listModels()), ['available-model']);
+  assert.deepEqual(structuredClone(await auth.listModels()), ['available-model', 'unsupported-model', 'new-model']);
   assert.equal(calls[0].headers['ChatGPT-Account-Id'], 'account-1');
   assert.equal(calls[0].url, 'https://chatgpt.com/backend-api/codex/models?client_version=0.1.0');
+});
+
+test('model catalog failure reports safe HTTP status without exposing response or token', async () => {
+  const { auth, secrets, calls } = harness(() => ({ status: 403, text: 'secret response body' }));
+  secrets.set('prism-codex-credential', JSON.stringify({ accessToken: token('account-1'),
+    refreshToken: 'refresh-1', accountId: 'account-1', expiresAt: Date.now() + 3600_000 }));
+  await assert.rejects(auth.listModels(), (error) => {
+    assert.match(error.message, /ChatGPT returned HTTP 403/);
+    assert.doesNotMatch(error.message, /secret response body|eyJ/);
+    return true;
+  });
+  assert.equal(calls.length, 1);
 });
