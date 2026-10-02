@@ -178,7 +178,8 @@ export default class PrismPlugin extends Plugin {
     this.registerEvent(this.app.vault.on('delete', (file) => {
       return sourceEvents.delete(file).catch(() => new Notice('Prism could not remove a Markdown source. Check plugin storage.'));
     }));
-    this.registerView(CHAT_VIEW_TYPE, (leaf) => new PrismChatView(leaf, (query) => this.answerQuery(query)));
+    this.registerView(CHAT_VIEW_TYPE, (leaf) => new PrismChatView(
+      leaf, (query) => this.answerQuery(query), (citation) => this.openCitation(citation)));
     const showChat = () => this.openChatView().catch(() => {
       new Notice('Prism could not open the Ask view. Try again.');
     });
