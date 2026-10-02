@@ -20,9 +20,6 @@ function answerErrorMessage(error: unknown): string {
         message === 'ChatGPT connection is not ready.') {
       return 'Connect or reconnect your ChatGPT account in Prism settings.';
     }
-    if (message === 'The selected Codex model is unavailable. Choose an available model in Prism settings.') {
-      return message;
-    }
     if (message === 'Codex model list is unavailable.' ||
         message === 'Codex model list is invalid.' ||
         message === 'No Codex models are available to this account.') {

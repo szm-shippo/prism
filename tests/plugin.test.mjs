@@ -320,6 +320,29 @@ test('ChatGPT account answers a local RAG query with citations and no API key', 
   assert.doesNotMatch(JSON.stringify(writes), /test-access|test-refresh|Grounded answer/);
 });
 
+test('ChatGPT Ask sends the selected model when the optional model list is unavailable', async () => {
+  const secrets = new Map([['prism-codex-credential', JSON.stringify({
+    accessToken: 'test-access', refreshToken: 'test-refresh', accountId: 'account-1',
+    expiresAt: Date.now() + 3600_000,
+  })]]);
+  const { plugin, listeners, MockTFile, requests } = await loadPlugin(null, false, secrets,
+    (request) => request.url.includes('/codex/models') ? { status: 503, text: '' } : undefined);
+  await plugin.setLlmConnection('chatgpt-codex');
+  await plugin.setCodexModel('gpt-5.5');
+  const file = new MockTFile('library.md', '# 夜間開館\n6月12日には空調設備が停止した。');
+  plugin.app.vault.files = [file];
+  await listeners.get('create')(file);
+  await assert.rejects(plugin.refreshCodexModels(), /unavailable/);
+
+  const answer = await plugin.answerQuery('6月12日');
+  assert.equal(answer.citations[0]?.path, 'library.md');
+  assert.deepEqual(requests.map((request) => request.url), [
+    'https://chatgpt.com/backend-api/codex/models?client_version=0.1.0',
+    'https://chatgpt.com/backend-api/codex/responses',
+  ]);
+  assert.equal(JSON.parse(requests[1].body).model, 'gpt-5.5');
+});
+
 test('connection test sends only its disclosed fixed prompt and reports success without saving a response', async () => {
   const secrets = new Map([['prism-codex-credential', JSON.stringify({
     accessToken: 'test-access', refreshToken: 'test-refresh', accountId: 'account-1',
@@ -422,11 +445,6 @@ test('Ask view validates input, shows loading and safe errors, then renders answ
   plugin.answerQuery = async () => { throw new Error('Connect a ChatGPT account in Prism settings.'); };
   await form.submit();
   assert.match(status.textContent, /Connect or reconnect your ChatGPT account/);
-  plugin.answerQuery = async () => {
-    throw new Error('The selected Codex model is unavailable. Choose an available model in Prism settings.');
-  };
-  await form.submit();
-  assert.match(status.textContent, /selected Codex model is unavailable/);
   plugin.answerQuery = async () => ({ content: '<img src=x onerror=alert(1)>', citations: [{
     sourceId: 'one', chunkId: 'one', path: '<b>source.md', startLine: 2, endLine: 3,
   }] });

@@ -156,10 +156,6 @@ export default class PrismPlugin extends Plugin {
       generate: async (request) => {
         if (this.settings.llmConnection === 'chatgpt-codex') {
           if (!this.codexAuth) throw new Error('ChatGPT connection is not ready.');
-          const available = await this.codexAuth.listModels();
-          if (!available.includes(this.settings.codexModel)) {
-            throw new Error('The selected Codex model is unavailable. Choose an available model in Prism settings.');
-          }
           return new CodexLLMProvider(this.codexAuth, this.settings.codexModel).generate(request);
         }
         const key = this.app.secretStorage.getSecret('prism-llm-api-key');
