@@ -13,6 +13,7 @@ class MockElement {
     this.textContent = '';
     this.value = '';
     this.disabled = false;
+    this.classes = [];
   }
 
   empty() { this.children = []; this.textContent = ''; }
@@ -20,10 +21,13 @@ class MockElement {
     const child = new MockElement(tag);
     child.textContent = options.text ?? '';
     child.attributes = options.attr ?? {};
+    if (options.cls) child.addClass(options.cls);
     this.children.push(child);
     return child;
   }
   createDiv(options) { return this.createEl('div', options); }
+  addClass(name) { this.classes.push(name); }
+  setAttribute(name, value) { this.attributes ??= {}; this.attributes[name] = value; }
   addEventListener(name, callback) { this.listeners.set(name, callback); }
   focus() { this.focused = true; }
   submit() { return this.listeners.get('submit')({ preventDefault() {} }); }
@@ -267,8 +271,10 @@ test('Ask command opens one view and submits a query through RAG with actionable
   const form = findElement(view.contentEl, (element) => element.tag === 'form');
   input.value = 'Local';
   await form.submit();
-  assert.equal(visibleText(view.contentEl.children.at(-2)), 'Grounded answer [^1]');
-  const inline = findElement(view.contentEl.children.at(-2), (element) => element.tag === 'button');
+  const conversation = findElement(view.contentEl, (element) => element.classes.includes('prism-ask-conversation'));
+  const response = findElement(conversation, (element) => element.classes.includes('prism-ask-answer'));
+  assert.equal(visibleText(response), 'Grounded answer [^1]');
+  const inline = findElement(response, (element) => element.tag === 'button');
   assert.equal(inline.type, 'button');
   assert.match(inline.attributes['aria-label'], /Open source facts\.md, lines 1–1/);
   await inline.click();
@@ -293,6 +299,36 @@ test('Ask command opens one view and submits a query through RAG with actionable
   await ribbonIcons[0].callback();
   assert.equal(leaves.filter((leaf) => leaf.state?.type === 'prism-chat').length, 1);
   assert.equal(revealed.length, 2);
+});
+
+test('Ask keeps the input after a scrollable conversation and orders each turn as question then answer and sources', async () => {
+  const { plugin, commands, leaves } = await loadPlugin(null);
+  await commands.find((command) => command.id === 'open-chat').callback();
+  const view = leaves[0].view;
+  const [heading, conversation, form] = view.contentEl.children;
+  assert.equal(heading.tag, 'h2');
+  assert.ok(view.contentEl.classes.includes('prism-ask-view'));
+  assert.ok(conversation.classes.includes('prism-ask-conversation'));
+  assert.equal(conversation.attributes.role, 'log');
+  assert.ok(form.classes.includes('prism-ask-form'));
+  assert.equal(findElement(form, (element) => element.tag === 'textarea')?.tag, 'textarea');
+  assert.equal(findElement(form, (element) => element.tag === 'button')?.type, 'submit');
+
+  plugin.answerQuery = async () => ({ content: 'First answer [^1]', citations: [{
+    sourceId: 'source', chunkId: 'chunk', path: 'fact.md', startLine: 1, endLine: 2,
+  }] });
+  findElement(form, (element) => element.tag === 'textarea').value = 'First question';
+  await form.submit();
+  const turn = conversation.children[0];
+  assert.ok(turn.classes.includes('prism-ask-turn'));
+  assert.equal(turn.children[0].textContent, 'First question');
+  assert.equal(visibleText(turn.children[1]), 'First answer [^1]');
+  assert.match(visibleText(turn.children[2]), /fact\.md/);
+  assert.equal(view.contentEl.children.at(-1), form);
+
+  const styles = await readFile(new URL('../styles.css', import.meta.url), 'utf8');
+  assert.match(styles, /\.prism-ask-view\s*\{[^}]*display:\s*flex;[^}]*flex-direction:\s*column;/s);
+  assert.match(styles, /\.prism-ask-conversation\s*\{[^}]*min-height:\s*0;[^}]*overflow-y:\s*auto;/s);
 });
 
 test('ChatGPT selection never charges the configured API key after missing OAuth credentials', async () => {
@@ -459,37 +495,40 @@ test('Ask view validates input, shows loading and safe errors, then renders answ
   const form = findElement(view.contentEl, (element) => element.tag === 'form');
   const input = findElement(view.contentEl, (element) => element.tag === 'textarea');
   const button = findElement(view.contentEl, (element) => element.tag === 'button');
-  const status = findElement(view.contentEl, (element) => element.attributes?.role === 'status');
+  const inputStatus = findElement(form, (element) => element.attributes?.role === 'status');
+  const conversation = findElement(view.contentEl, (element) => element.classes.includes('prism-ask-conversation'));
+  const turnStatus = () => findElement(conversation, (element) => element.attributes?.role === 'status');
   let calls = 0;
   plugin.answerQuery = () => { calls += 1; return Promise.reject(new Error('private note contents')); };
   await form.submit();
-  assert.equal(status.textContent, 'Enter a question.');
+  assert.equal(inputStatus.textContent, 'Enter a question.');
   assert.equal(input.focused, true);
   assert.equal(calls, 0);
   input.value = 'Question';
   let fail;
   plugin.answerQuery = () => { calls += 1; return new Promise((_resolve, reject) => { fail = reject; }); };
   const pending = form.submit();
-  assert.equal(status.textContent, 'Answering…');
+  assert.equal(turnStatus().textContent, 'Answering…');
   assert.equal(button.disabled, true);
   await form.submit();
   assert.equal(calls, 1);
   fail(new Error('private note contents'));
   await pending;
-  assert.match(status.textContent, /Check provider settings, indexing, and network/);
-  assert.doesNotMatch(status.textContent, /private note contents/);
+  assert.match(turnStatus().textContent, /Check provider settings, indexing, and network/);
+  assert.doesNotMatch(turnStatus().textContent, /private note contents/);
   assert.equal(button.disabled, false);
   plugin.answerQuery = async () => { throw new Error('Connect a ChatGPT account in Prism settings.'); };
   await form.submit();
-  assert.match(status.textContent, /Connect or reconnect your ChatGPT account/);
+  assert.match(turnStatus().textContent, /Connect or reconnect your ChatGPT account/);
   plugin.answerQuery = async () => ({ content: '<img src=x onerror=alert(1)>', citations: [{
     sourceId: 'one', chunkId: 'one', path: '<b>source.md', startLine: 2, endLine: 3,
   }] });
   await form.submit();
-  assert.equal(visibleText(view.contentEl.children.at(-2)), '<img src=x onerror=alert(1)>');
+  assert.equal(visibleText(findElement(conversation, (element) => element.classes.includes('prism-ask-answer'))),
+    '<img src=x onerror=alert(1)>');
   assert.equal(findElement(view.contentEl, (element) => element.tag === 'img'), undefined);
   assert.match(visibleText(findElement(view.contentEl, (element) => element.tag === 'li')), /<b>source\.md/);
-  assert.equal(status.textContent, 'Answer ready.');
+  assert.equal(turnStatus().textContent, 'Answer ready.');
 });
 
 test('citation open errors remain safe in the Ask view', async () => {
@@ -502,7 +541,7 @@ test('citation open errors remain safe in the Ask view', async () => {
   plugin.openCitation = async () => { throw new Error('private note contents'); };
   findElement(view.contentEl, (element) => element.tag === 'textarea').value = 'Question';
   await findElement(view.contentEl, (element) => element.tag === 'form').submit();
-  const answer = view.contentEl.children.at(-2);
+  const answer = findElement(view.contentEl, (element) => element.classes.includes('prism-ask-answer'));
   assert.equal(visibleText(answer), 'Answer [^1] and [^9]');
   assert.equal(answer.children.filter((child) => child.tag === 'button').length, 1);
   await findElement(answer, (element) => element.tag === 'button').click();
