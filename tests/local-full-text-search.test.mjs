@@ -42,6 +42,16 @@ test('search finds identifiers, numbers, error strings and Japanese text after r
   assert.deepEqual(await reopened.search('missing', 5), []);
 });
 
+test('a Japanese sentence finds a dated note without matching the whole question', async () => {
+  const index = await LocalFullTextSearch.open(storage());
+  await index.index([
+    chunk('incident', 'library', '6月12日には空調設備の一時停止があり、閲覧席を閉鎖した。貸出・返却窓口は21時まで継続した。'),
+    chunk('policy', 'library', '7月には次回の夜間開館実験について検討した。'),
+  ]);
+  const hits = await index.search('6月12日に何が起こり、どのサービスが継続した？', 5);
+  assert.equal(hits[0]?.chunkId, 'incident');
+});
+
 test('updating a chunk replaces its searchable text and deleting a source retains other results', async () => {
   const index = await LocalFullTextSearch.open(storage());
   await index.index([chunk('a', 'one', 'old term'), chunk('b', 'two', 'other term')]);

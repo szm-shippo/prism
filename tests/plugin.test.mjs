@@ -320,6 +320,58 @@ test('ChatGPT account answers a local RAG query with citations and no API key', 
   assert.doesNotMatch(JSON.stringify(writes), /test-access|test-refresh|Grounded answer/);
 });
 
+test('ChatGPT Ask sends the selected model when the optional model list is unavailable', async () => {
+  const secrets = new Map([['prism-codex-credential', JSON.stringify({
+    accessToken: 'test-access', refreshToken: 'test-refresh', accountId: 'account-1',
+    expiresAt: Date.now() + 3600_000,
+  })]]);
+  const { plugin, listeners, MockTFile, requests } = await loadPlugin(null, false, secrets,
+    (request) => request.url.includes('/codex/models') ? { status: 503, text: '' } : undefined);
+  await plugin.setLlmConnection('chatgpt-codex');
+  await plugin.setCodexModel('gpt-5.5');
+  const file = new MockTFile('library.md', '# 夜間開館\n6月12日には空調設備が停止した。');
+  plugin.app.vault.files = [file];
+  await listeners.get('create')(file);
+  await assert.rejects(plugin.refreshCodexModels(), /ChatGPT returned HTTP 503/);
+
+  const answer = await plugin.answerQuery('6月12日');
+  assert.equal(answer.citations[0]?.path, 'library.md');
+  assert.deepEqual(requests.map((request) => request.url), [
+    'https://chatgpt.com/backend-api/codex/models?client_version=0.155.0',
+    'https://chatgpt.com/backend-api/codex/responses',
+  ]);
+  assert.equal(JSON.parse(requests[1].body).model, 'gpt-5.5');
+});
+
+test('refreshed Codex models become a dropdown and selection changes the tested model', async () => {
+  const secrets = new Map([['prism-codex-credential', JSON.stringify({
+    accessToken: 'test-access', refreshToken: 'test-refresh', accountId: 'account-1',
+    expiresAt: Date.now() + 3600_000,
+  })]]);
+  const { plugin, tabs, requests, writes } = await loadPlugin({
+    llmConnection: 'chatgpt-codex', codexModel: 'saved-model',
+  }, false, secrets, (request) => request.url.includes('/codex/models') ? { status: 200,
+    text: JSON.stringify({ models: [
+      { slug: 'gpt-5.5', visibility: 'list' },
+      { slug: 'hidden-model', visibility: 'hide' },
+    ] }) } : undefined);
+  tabs[0].display();
+  assert.equal(tabs[0].containerEl.children.find((child) => child.name === 'Codex model').text.value,
+    'saved-model');
+  await tabs[0].containerEl.children.find((child) => child.name === 'Codex models').button.click();
+  const modelSetting = tabs[0].containerEl.children.find((child) => child.name === 'Codex model');
+  assert.deepEqual([...modelSetting.dropdown.options], [
+    ['saved-model', 'saved-model (saved model)'], ['gpt-5.5', 'gpt-5.5'],
+  ]);
+  assert.equal(modelSetting.dropdown.value, 'saved-model');
+  await modelSetting.dropdown.change('gpt-5.5');
+  assert.equal(plugin.settings.codexModel, 'gpt-5.5');
+  assert.equal(writes.at(-1).codexModel, 'gpt-5.5');
+  await plugin.testCodexConnection();
+  assert.equal(JSON.parse(requests.find((request) => request.url.includes('/codex/responses')).body).model,
+    'gpt-5.5');
+});
+
 test('connection test sends only its disclosed fixed prompt and reports success without saving a response', async () => {
   const secrets = new Map([['prism-codex-credential', JSON.stringify({
     accessToken: 'test-access', refreshToken: 'test-refresh', accountId: 'account-1',
@@ -419,6 +471,9 @@ test('Ask view validates input, shows loading and safe errors, then renders answ
   assert.match(status.textContent, /Check provider settings, indexing, and network/);
   assert.doesNotMatch(status.textContent, /private note contents/);
   assert.equal(button.disabled, false);
+  plugin.answerQuery = async () => { throw new Error('Connect a ChatGPT account in Prism settings.'); };
+  await form.submit();
+  assert.match(status.textContent, /Connect or reconnect your ChatGPT account/);
   plugin.answerQuery = async () => ({ content: '<img src=x onerror=alert(1)>', citations: [{
     sourceId: 'one', chunkId: 'one', path: '<b>source.md', startLine: 2, endLine: 3,
   }] });
@@ -484,6 +539,20 @@ test('query flows from local retrieval to a cited answer without remote embeddin
   assert.deepEqual(requests.map((request) => request.url), ['https://api.openai.com/v1/responses']);
   assert.equal((await plugin.answerQuery('no-matching-term')).citations.length, 0);
   assert.equal(requests.length, 1);
+});
+
+test('a Japanese Ask question retrieves its dated Vault note without remote embedding', async () => {
+  const { plugin, listeners, MockTFile, requests } = await loadPlugin(null);
+  await plugin.setLlmModel('answer-model');
+  plugin.setLlmApiKey('test-key');
+  const file = new MockTFile('library.md', '# 夜間開館\n6月12日には空調設備が停止した。貸出・返却窓口は21時まで継続した。');
+  plugin.app.vault.files = [file];
+  await listeners.get('create')(file);
+
+  const answer = await plugin.answerQuery('6月12日に何が起こり、どのサービスが継続した？');
+  assert.equal(answer.citations[0]?.path, 'library.md');
+  assert.deepEqual(requests.map((request) => request.url), ['https://api.openai.com/v1/responses']);
+  assert.match(requests[0].body, /6月12日には空調設備が停止した/);
 });
 
 test('query uses a consented vector index and discloses the query embedding request', async () => {

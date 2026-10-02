@@ -6,6 +6,8 @@ const TOKEN_URL = `${AUTH_ORIGIN}/oauth/token`;
 const SECRET_ID = 'prism-codex-credential';
 const LOGIN_TIMEOUT_MS = 15 * 60 * 1000;
 const REFRESH_SKEW_MS = 2 * 60 * 1000;
+// The catalog filters by Codex client version; Prism's plugin version is unrelated.
+const CODEX_CATALOG_CLIENT_VERSION = '0.155.0';
 
 type Transport = typeof requestUrl;
 type SecretStore = { getSecret(id: string): string | null; setSecret(id: string, value: string): void };
@@ -25,6 +27,8 @@ export interface DevicePrompt {
   complete: Promise<void>;
   cancel(): void;
 }
+
+export class CodexModelListError extends Error {}
 
 function record(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid authentication response.');
@@ -155,8 +159,7 @@ export class CodexAuth {
   private generation = 0;
   private models?: string[];
 
-  constructor(private readonly secrets: SecretStore, private readonly transport: Transport = requestUrl,
-    private readonly clientVersion = '0.1.0') {}
+  constructor(private readonly secrets: SecretStore, private readonly transport: Transport = requestUrl) {}
 
   get accountId(): string | undefined { return this.read()?.accountId; }
   get connected(): boolean { return this.read() !== undefined; }
@@ -260,25 +263,29 @@ export class CodexAuth {
     const access = await this.access();
     const query = async (token: string, accountId: string) => {
       try {
-        return await this.transport({ url: `https://chatgpt.com/backend-api/codex/models?client_version=${encodeURIComponent(this.clientVersion)}`,
+        return await this.transport({ url: `https://chatgpt.com/backend-api/codex/models?client_version=${CODEX_CATALOG_CLIENT_VERSION}`,
           method: 'GET', headers: { Authorization: `Bearer ${token}`, 'ChatGPT-Account-Id': accountId,
             originator: 'prism' }, throw: false });
-      } catch { throw new Error('Codex model list is unavailable.'); }
+      } catch { throw new CodexModelListError('Could not load Codex models: connection failed.'); }
     };
     let response = await query(access.token, access.accountId);
     if (response.status === 401) {
       const renewed = await this.refreshAfterUnauthorized(access.token);
       response = await query(renewed.token, renewed.accountId);
     }
-    if (response.status < 200 || response.status >= 300) throw new Error('Codex model list is unavailable.');
-    const models = parseJson(response.text).models;
-    if (!Array.isArray(models)) throw new Error('Codex model list is invalid.');
+    if (response.status < 200 || response.status >= 300) {
+      throw new CodexModelListError(`Could not load Codex models: ChatGPT returned HTTP ${response.status}.`);
+    }
+    let models: unknown;
+    try { models = parseJson(response.text).models; }
+    catch { throw new CodexModelListError('Could not load Codex models: invalid response.'); }
+    if (!Array.isArray(models)) throw new CodexModelListError('Could not load Codex models: invalid response.');
     const available = models.filter((item): item is Record<string, unknown> =>
       Boolean(item && typeof item === 'object' && !Array.isArray(item)))
-      .filter((item) => item.visibility === 'list' && item.supported_in_api === true)
+      .filter((item) => item.visibility === 'list')
       .map((item) => item.slug)
       .filter((slug): slug is string => typeof slug === 'string' && slug.length > 0);
-    if (available.length === 0) throw new Error('No Codex models are available to this account.');
+    if (available.length === 0) throw new CodexModelListError('Could not load Codex models: no listed models.');
     this.models = available;
     return available;
   }
