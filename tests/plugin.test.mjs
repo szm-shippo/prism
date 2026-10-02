@@ -343,6 +343,35 @@ test('ChatGPT Ask sends the selected model when the optional model list is unava
   assert.equal(JSON.parse(requests[1].body).model, 'gpt-5.5');
 });
 
+test('refreshed Codex models become a dropdown and selection changes the tested model', async () => {
+  const secrets = new Map([['prism-codex-credential', JSON.stringify({
+    accessToken: 'test-access', refreshToken: 'test-refresh', accountId: 'account-1',
+    expiresAt: Date.now() + 3600_000,
+  })]]);
+  const { plugin, tabs, requests, writes } = await loadPlugin({
+    llmConnection: 'chatgpt-codex', codexModel: 'saved-model',
+  }, false, secrets, (request) => request.url.includes('/codex/models') ? { status: 200,
+    text: JSON.stringify({ models: [
+      { slug: 'gpt-5.5', visibility: 'list' },
+      { slug: 'hidden-model', visibility: 'hide' },
+    ] }) } : undefined);
+  tabs[0].display();
+  assert.equal(tabs[0].containerEl.children.find((child) => child.name === 'Codex model').text.value,
+    'saved-model');
+  await tabs[0].containerEl.children.find((child) => child.name === 'Codex models').button.click();
+  const modelSetting = tabs[0].containerEl.children.find((child) => child.name === 'Codex model');
+  assert.deepEqual([...modelSetting.dropdown.options], [
+    ['saved-model', 'saved-model (saved model)'], ['gpt-5.5', 'gpt-5.5'],
+  ]);
+  assert.equal(modelSetting.dropdown.value, 'saved-model');
+  await modelSetting.dropdown.change('gpt-5.5');
+  assert.equal(plugin.settings.codexModel, 'gpt-5.5');
+  assert.equal(writes.at(-1).codexModel, 'gpt-5.5');
+  await plugin.testCodexConnection();
+  assert.equal(JSON.parse(requests.find((request) => request.url.includes('/codex/responses')).body).model,
+    'gpt-5.5');
+});
+
 test('connection test sends only its disclosed fixed prompt and reports success without saving a response', async () => {
   const secrets = new Map([['prism-codex-credential', JSON.stringify({
     accessToken: 'test-access', refreshToken: 'test-refresh', accountId: 'account-1',

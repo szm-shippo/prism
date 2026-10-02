@@ -463,12 +463,26 @@ class PrismSettingTab extends PluginSettingTab {
         }));
 
     const codexModels = this.prism.getCodexStatus().models;
-    new Setting(containerEl)
+    const modelSetting = new Setting(containerEl)
       .setName(this.prism.settings.llmConnection === 'api-key' ? 'LLM model' : 'Codex model')
       .setDesc(this.prism.settings.llmConnection === 'api-key' ? 'OpenAI model ID used for answers.'
-        : codexModels.length ? `Available on this account: ${codexModels.join(', ')}`
-          : 'Codex model ID used for answers. Connect to load the available models for this account.')
-      .addText((text) => text
+        : codexModels.length ? 'Select a model returned for this account. Test the connection to verify access.'
+          : 'Enter a model ID or refresh the model list to choose one.');
+    if (this.prism.settings.llmConnection === 'chatgpt-codex' && codexModels.length) {
+      const selected = this.prism.settings.codexModel;
+      modelSetting.addDropdown((dropdown) => {
+        if (!selected) dropdown.addOption('', 'Choose a model');
+        if (selected && !codexModels.includes(selected)) dropdown.addOption(selected, `${selected} (saved model)`);
+        for (const model of codexModels) dropdown.addOption(model, model);
+        dropdown.setValue(selected).onChange(async (value) => {
+          try {
+            await this.prism.setCodexModel(value);
+            this.invalidateConnectionTest();
+          } catch { new Notice('Prism could not save the model. Try again.'); }
+        });
+      });
+    } else {
+      modelSetting.addText((text) => text
         .setPlaceholder('Model ID')
         .setValue(this.prism.settings.llmConnection === 'api-key' ? this.prism.settings.llmModel : this.prism.settings.codexModel)
         .onChange(async (value) => {
@@ -478,10 +492,9 @@ class PrismSettingTab extends PluginSettingTab {
               await this.prism.setCodexModel(value);
               this.invalidateConnectionTest();
             }
-          } catch {
-            new Notice('Prism could not save the model. Try again.');
-          }
+          } catch { new Notice('Prism could not save the model. Try again.'); }
         }));
+    }
 
     if (this.prism.settings.llmConnection === 'chatgpt-codex') {
       containerEl.createEl('p', { text: 'Experimental Codex compatibility uses a ChatGPT account with Codex access. It uses an interface that can change. Device authorization contacts https://auth.openai.com. You may need to enable device-code sign-in in ChatGPT settings.' });
