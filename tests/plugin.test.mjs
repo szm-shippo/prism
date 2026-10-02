@@ -43,7 +43,7 @@ function visibleText(element) {
   return element.textContent + element.children.map(visibleText).join('');
 }
 
-async function loadPlugin(savedData, failSave = false, storedSecrets = new Map()) {
+async function loadPlugin(savedData, failSave = false, storedSecrets = new Map(), responseOverride) {
   const manifest = JSON.parse(await readFile(new URL('../manifest.json', import.meta.url), 'utf8'));
   const bundle = await readFile(new URL('../main.js', import.meta.url), 'utf8');
   const module = { exports: {} };
@@ -203,12 +203,15 @@ async function loadPlugin(savedData, failSave = false, storedSecrets = new Map()
         TFile: MockTFile,
         requestUrl: async (request) => {
           requests.push(request);
+          const overridden = await responseOverride?.(request);
+          if (overridden) return overridden;
           if (request.url.includes('/codex/models')) return { status: 200, text: JSON.stringify({
             models: [{ slug: 'codex-model', visibility: 'list', supported_in_api: true }],
           }) };
           if (request.url.includes('/codex/responses')) {
             const messages = JSON.parse(request.body).input;
             const reference = messages.find((message) => message.content.startsWith('Reference material:\n'));
+            if (!reference) return { status: 200, text: 'data: {"type":"response.output_text.delta","delta":"OK"}\n\ndata: {"type":"response.completed"}\n\n' };
             const context = JSON.parse(reference.content.slice('Reference material:\n'.length));
             return { status: 200, text: `data: ${JSON.stringify({ type: 'response.output_text.delta',
               delta: `Grounded answer [cite:${context[0].chunkId}]` })}\n\ndata: {"type":"response.completed"}\n\n` };
@@ -315,6 +318,75 @@ test('ChatGPT account answers a local RAG query with citations and no API key', 
   assert.equal(requests.filter((request) => request.url.includes('/codex/responses')).length, 1);
   assert.equal(requests.some((request) => request.url === 'https://api.openai.com/v1/responses'), false);
   assert.doesNotMatch(JSON.stringify(writes), /test-access|test-refresh|Grounded answer/);
+});
+
+test('connection test sends only its disclosed fixed prompt and reports success without saving a response', async () => {
+  const secrets = new Map([['prism-codex-credential', JSON.stringify({
+    accessToken: 'test-access', refreshToken: 'test-refresh', accountId: 'account-1',
+    expiresAt: Date.now() + 3600_000,
+  })]]);
+  const { plugin, tabs, requests, writes } = await loadPlugin(null, false, secrets);
+  await plugin.setLlmConnection('chatgpt-codex');
+  tabs[0].display();
+  const setting = tabs[0].containerEl.children.find((child) => child.name === 'Test ChatGPT connection');
+  assert.match(setting.description, /Reply with OK.*chatgpt\.com\/backend-api\/codex\/responses/);
+  assert.equal(setting.button.disabled, false);
+  await setting.button.click();
+  const sent = requests.filter((request) => request.url.includes('/codex/responses'));
+  assert.equal(sent.length, 1);
+  assert.deepEqual(structuredClone(JSON.parse(sent[0].body).input), [{ role: 'user', content: 'Reply with OK.' }]);
+  assert.equal(requests.some((request) => request.url === 'https://api.openai.com/v1/responses'), false);
+  assert.equal(tabs[0].containerEl.children.find((child) => child.attributes?.role === 'status').text,
+    'Connection succeeded.');
+  assert.doesNotMatch(JSON.stringify(writes), /test-access|test-refresh|Reply with OK|Connection succeeded/);
+});
+
+test('connection test shows safe failure categories and disables the button without OAuth credentials', async () => {
+  for (const [status, expected] of [[401, /Authentication failed/], [403, /not permitted/],
+    [429, /rate limited/], [503, /unavailable/]]) {
+    const secrets = new Map([['prism-codex-credential', JSON.stringify({
+      accessToken: 'test-access', refreshToken: 'test-refresh', accountId: 'account-1',
+      expiresAt: Date.now() + 3600_000,
+    })]]);
+    const { plugin, tabs } = await loadPlugin(null, false, secrets,
+      (request) => request.url.includes('/codex/responses') ? { status, text: 'private token and note' } : undefined);
+    await plugin.setLlmConnection('chatgpt-codex');
+    tabs[0].display();
+    await tabs[0].containerEl.children.find((child) => child.name === 'Test ChatGPT connection').button.click();
+    const message = tabs[0].containerEl.children.find((child) => child.attributes?.role === 'status').text;
+    assert.match(message, expected);
+    assert.doesNotMatch(message, /private token and note|test-access|account-1/);
+  }
+  const missing = await loadPlugin({ llmConnection: 'chatgpt-codex' });
+  missing.tabs[0].display();
+  assert.equal(missing.tabs[0].containerEl.children.find((child) => child.name === 'Test ChatGPT connection').button.disabled, true);
+  assert.equal(missing.requests.length, 0);
+});
+
+test('sign-out during a connection test discards its late result and prevents duplicate requests', async () => {
+  const secrets = new Map([['prism-codex-credential', JSON.stringify({
+    accessToken: 'test-access', refreshToken: 'test-refresh', accountId: 'account-1',
+    expiresAt: Date.now() + 3600_000,
+  })]]);
+  let finish;
+  let started;
+  const requestStarted = new Promise((resolve) => { started = resolve; });
+  const { plugin, tabs, requests } = await loadPlugin(null, false, secrets,
+    (request) => request.url.includes('/codex/responses')
+      ? new Promise((resolve) => { finish = resolve; started(); }) : undefined);
+  await plugin.setLlmConnection('chatgpt-codex');
+  tabs[0].display();
+  const first = tabs[0].containerEl.children.find((child) => child.name === 'Test ChatGPT connection').button;
+  const pending = first.click();
+  await requestStarted;
+  assert.equal(tabs[0].containerEl.children.find((child) => child.name === 'Test ChatGPT connection').button.disabled, true);
+  await first.click();
+  assert.equal(requests.filter((request) => request.url.includes('/codex/responses')).length, 1);
+  tabs[0].containerEl.children.find((child) => child.name === 'ChatGPT account').buttons[1].click();
+  finish({ status: 200, text: 'data: {"type":"response.output_text.delta","delta":"OK"}\n\ndata: {"type":"response.completed"}\n\n' });
+  await pending;
+  assert.equal(tabs[0].containerEl.children.find((child) => child.attributes?.role === 'status'), undefined);
+  assert.equal(tabs[0].containerEl.children.find((child) => child.name === 'Test ChatGPT connection').button.disabled, true);
 });
 
 test('Ask view validates input, shows loading and safe errors, then renders answer as text', async () => {

@@ -26,6 +26,6 @@ Provider 設定で回答に使う接続とモデルを選び、API キー接続�
 
 ## ChatGPT (Codex) 接続
 
-設定の「LLM connection」で「ChatGPT (Codex, experimental)」を選び、「Connect」で表示されたコードを OpenAI の Device Code 認証ページに入力します。ChatGPT 側の設定で Device Code ログインの有効化が必要な場合があります。接続後は Codex モデル ID を指定します。ChatGPT 認証情報はデバイスごとの Obsidian Secret Storage に保存され、「Sign out」でローカルから消去されます。
+設定の「LLM connection」で「ChatGPT (Codex, experimental)」を選び、「Connect」で表示されたコードを OpenAI の Device Code 認証ページに入力します。ChatGPT 側の設定で Device Code ログインの有効化が必要な場合があります。接続後は Codex モデル ID を指定します。「Test connection」は固定文 `Reply with OK.` のみを `https://chatgpt.com/backend-api/codex/responses` に送信し、現在の接続で応答できるか確認します。このテストでは Vault の内容を送信しません。ChatGPT 認証情報はデバイスごとの Obsidian Secret Storage に保存され、「Sign out」でローカルから消去されます。
 
 この接続は Codex との実験的な互換方式です。回答時には質問と検索で選ばれた出典 ID・本文を `https://chatgpt.com/backend-api/codex/responses` に送信します。公開 API とは異なる経路なので、OpenAI 側の変更で動作しなくなる可能性があります。認証や回答が失敗しても、OpenAI API キーでの課金へ自動的に切り替わりません。Embedding は従来どおり別の API キー設定が必要です。
