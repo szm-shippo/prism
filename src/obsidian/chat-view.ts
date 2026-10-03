@@ -54,21 +54,37 @@ export class PrismChatView extends ItemView {
 
   async onOpen(): Promise<void> {
     this.contentEl.empty();
-    this.contentEl.createEl('h2', { text: 'Ask Prism' });
+    this.contentEl.addClass('prism-ask-view');
+    Object.assign(this.contentEl.style, {
+      display: 'flex', flexDirection: 'column', boxSizing: 'border-box',
+      height: '100%', minHeight: '0', overflow: 'hidden',
+    });
+    const heading = this.contentEl.createEl('h2', { text: 'Ask Prism' });
+    heading.style.flex = 'none';
+    const conversation = this.contentEl.createDiv({ cls: 'prism-ask-conversation' });
+    Object.assign(conversation.style, {
+      flex: '1 1 auto', minHeight: '0', overflowY: 'auto', overflowWrap: 'anywhere',
+    });
+    conversation.setAttribute('role', 'log');
+    conversation.setAttribute('aria-label', 'Prism Ask conversation');
     const form = this.contentEl.createEl('form');
+    form.addClass('prism-ask-form');
+    Object.assign(form.style, { flex: 'none', maxHeight: '50%', overflowY: 'auto' });
     const label = form.createEl('label', { text: 'Question' });
+    Object.assign(label.style, { display: 'block', width: '100%', boxSizing: 'border-box' });
     const query = label.createEl('textarea', {
       attr: { rows: '4', placeholder: 'Ask about your Vault Markdown' },
     });
+    Object.assign(query.style, {
+      display: 'block', width: '100%', boxSizing: 'border-box',
+      maxHeight: '30vh', resize: 'vertical',
+    });
     const submit = form.createEl('button', { text: 'Ask' });
     submit.type = 'submit';
-    const status = this.contentEl.createEl('p', { attr: { role: 'status', 'aria-live': 'polite' } });
-    const response = this.contentEl.createDiv();
-    response.style.whiteSpace = 'pre-wrap';
-    const sources = this.contentEl.createDiv();
+    const inputStatus = form.createEl('p', { attr: { role: 'status', 'aria-live': 'polite' } });
     form.addEventListener('submit', (event) => {
       event.preventDefault();
-      return this.submit(query, submit, status, response, sources);
+      return this.submit(query, submit, inputStatus, conversation);
     });
   }
 
@@ -80,23 +96,28 @@ export class PrismChatView extends ItemView {
   private async submit(
     query: HTMLTextAreaElement,
     button: HTMLButtonElement,
-    status: HTMLElement,
-    response: HTMLDivElement,
-    sources: HTMLDivElement,
+    inputStatus: HTMLElement,
+    conversation: HTMLDivElement,
   ): Promise<void> {
     if (this.pending) return;
     const question = query.value.trim();
     if (!question) {
-      status.textContent = 'Enter a question.';
+      inputStatus.textContent = 'Enter a question.';
       query.focus();
       return;
     }
     const request = ++this.requestId;
     this.pending = true;
     button.disabled = true;
+    inputStatus.textContent = '';
+    conversation.empty();
+    const turn = conversation.createDiv({ cls: 'prism-ask-turn' });
+    turn.createEl('p', { cls: 'prism-ask-question', text: question });
+    const response = turn.createDiv({ cls: 'prism-ask-answer' });
+    response.style.whiteSpace = 'pre-wrap';
+    const sources = turn.createDiv();
+    const status = turn.createEl('p', { attr: { role: 'status', 'aria-live': 'polite' } });
     status.textContent = 'Answering…';
-    response.empty();
-    sources.empty();
     try {
       const answer = await this.answer(question);
       if (request !== this.requestId) return;
@@ -114,9 +135,11 @@ export class PrismChatView extends ItemView {
         }
       }
       status.textContent = 'Answer ready.';
+      conversation.scrollTop = conversation.scrollHeight;
     } catch (error) {
       if (request === this.requestId) {
         status.textContent = answerErrorMessage(error);
+        conversation.scrollTop = conversation.scrollHeight;
       }
     } finally {
       if (request === this.requestId) {
