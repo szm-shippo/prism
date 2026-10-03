@@ -632,7 +632,7 @@ test('settings automatically load Codex models, preserve the saved selection and
       { slug: 'hidden-model', visibility: 'hide' },
     ] }) } : undefined);
   tabs[0].display();
-  assert.equal(tabs[0].containerEl.children.find((child) => child.name === 'Codex model').text.value,
+  assert.equal(tabs[0].containerEl.children.find((child) => child.name === 'Codex model').dropdown.value,
     'saved-model');
   await new Promise(setImmediate);
   tabs[0].display();
@@ -1370,6 +1370,8 @@ test('automatic model failure and empty response stop retries until manual refre
     tabs[0].display();
     await new Promise(setImmediate);
     assert.equal(requests.filter((request) => request.url.includes('/codex/models')).length, 1);
+    assert.equal(setting('Codex model').text, undefined);
+    assert.equal(setting('Codex model').dropdown.value, 'saved');
     assert.match(setting('Codex models').description, /Could not load/);
     assert.doesNotMatch(setting('Codex models').description, /private response|test-access/);
     assert.equal(plugin.settings.codexModel, 'saved');
@@ -1415,4 +1417,16 @@ test('model loading disables duplicate refresh and does not redraw hidden or sig
     assert.equal(settings.children, children);
     if (action === 'sign-out') assert.equal(plugin.getCodexStatus().models.length, 0);
   }
+});
+
+
+test('disconnected Codex model is a dropdown even with no saved selection', async () => {
+  const { tabs, requests } = await loadPlugin({ llmConnection: 'chatgpt-codex', codexModel: '' });
+  tabs[0].display();
+  const model = tabs[0].containerEl.children.find((child) => child.name === 'Codex model');
+  assert.equal(model.text, undefined);
+  assert.equal(model.dropdown.value, '');
+  assert.equal(model.dropdown.options.get(''), 'No models available');
+  await new Promise(setImmediate);
+  assert.equal(requests.length, 0);
 });

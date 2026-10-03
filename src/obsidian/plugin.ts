@@ -628,11 +628,11 @@ class PrismSettingTab extends PluginSettingTab {
       .setName(this.prism.settings.llmConnection === 'api-key' ? 'LLM model' : 'Codex model')
       .setDesc(this.prism.settings.llmConnection === 'api-key' ? 'OpenAI model ID used for answers.'
         : codexModels.length ? 'Select a model returned for this account. Test the connection to verify access.'
-          : 'Enter a model ID or refresh the model list to choose one.');
-    if (this.prism.settings.llmConnection === 'chatgpt-codex' && codexModels.length) {
+          : 'The model list loads when connected. Use Refresh models to retry; your saved model is retained.');
+    if (this.prism.settings.llmConnection === 'chatgpt-codex') {
       const selected = this.prism.settings.codexModel;
       modelSetting.addDropdown((dropdown) => {
-        if (!selected) dropdown.addOption('', 'Choose a model');
+        if (!selected) dropdown.addOption('', codexModels.length ? 'Choose a model' : 'No models available');
         if (selected && !codexModels.includes(selected)) dropdown.addOption(selected, `${selected} (saved model)`);
         for (const model of codexModels) dropdown.addOption(model, model);
         dropdown.setValue(selected).onChange(async (value) => {
@@ -645,14 +645,10 @@ class PrismSettingTab extends PluginSettingTab {
     } else {
       modelSetting.addText((text) => text
         .setPlaceholder('Model ID')
-        .setValue(this.prism.settings.llmConnection === 'api-key' ? this.prism.settings.llmModel : this.prism.settings.codexModel)
+        .setValue(this.prism.settings.llmModel)
         .onChange(async (value) => {
           try {
-            if (this.prism.settings.llmConnection === 'api-key') await this.prism.setLlmModel(value);
-            else {
-              await this.prism.setCodexModel(value);
-              this.invalidateConnectionTest();
-            }
+            await this.prism.setLlmModel(value);
           } catch { new Notice('Prism could not save the model. Try again.'); }
         }));
     }
