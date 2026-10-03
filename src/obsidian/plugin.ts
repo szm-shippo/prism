@@ -1,6 +1,7 @@
 import { Modal, Notice, Plugin, PluginSettingTab, Setting, TFile } from 'obsidian';
 import { CitationAnswerer, type CitedAnswer, type SourceCitation } from '../core/application/citation-answerer';
 import { RagPipeline } from '../core/application/rag-pipeline';
+import type { ConversationExchange } from '../core/application/conversation-history';
 import { SourceRegistry, type SourceRecord } from '../core/index/source-registry';
 import { ChunkRegistry } from '../core/index/chunk-registry';
 import { ChunkPipeline } from '../core/index/chunk-pipeline';
@@ -190,7 +191,7 @@ export default class PrismPlugin extends Plugin {
       return sourceEvents.delete(file).catch(() => new Notice('Prism could not remove a Markdown source. Check plugin storage.'));
     }));
     this.registerView(CHAT_VIEW_TYPE, (leaf) => new PrismChatView(
-      leaf, (query) => this.answerQuery(query), (citation) => this.openCitation(citation)));
+      leaf, (query, history) => this.answerQuery(query, history), (citation) => this.openCitation(citation)));
     const showChat = () => this.openChatView().catch(() => {
       new Notice('Prism could not open the Ask view. Try again.');
     });
@@ -278,9 +279,9 @@ export default class PrismPlugin extends Plugin {
     return true;
   }
 
-  async answerQuery(query: string): Promise<CitedAnswer> {
+  async answerQuery(query: string, history: readonly ConversationExchange[] = []): Promise<CitedAnswer> {
     if (!this.ragPipeline) throw new Error('Prism search is not ready.');
-    return this.ragPipeline.answer(query);
+    return this.ragPipeline.answer(query, history);
   }
 
   private async openChatView(): Promise<void> {
@@ -447,7 +448,7 @@ class PrismSettingTab extends PluginSettingTab {
     }
 
     containerEl.createEl('p', {
-      text: 'Remote processing: OpenAI receives Markdown or chunk text for embeddings when enabled, and your query for vector search when a consented vector index exists. For answers, your selected OpenAI connection receives your query plus retrieved source IDs, chunk IDs, and text. API-key answers go to https://api.openai.com/v1/responses; ChatGPT (Codex) answers go to https://chatgpt.com/backend-api/codex/responses. This data leaves your Vault for those requests.',
+      text: 'Remote processing: OpenAI receives Markdown or chunk text for embeddings when enabled, and your query plus retained previous questions for vector search when a consented vector index exists. For answers, your selected OpenAI connection receives your query, up to 6 recent question/answer pairs (12,000 UTF-8 bytes), plus retrieved source IDs, chunk IDs, and text. API-key answers go to https://api.openai.com/v1/responses; ChatGPT (Codex) answers go to https://chatgpt.com/backend-api/codex/responses. This data leaves your Vault for those requests.',
     });
 
     new Setting(containerEl)

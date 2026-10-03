@@ -2,6 +2,7 @@ import type { CitedAnswer, CitedChunk, CitationAnswerer } from './citation-answe
 import type { ChunkRegistry } from '../index/chunk-registry';
 import type { HybridRetrieval } from '../index/hybrid-retrieval';
 import type { RetrievalReranker } from '../index/retrieval-reranker';
+import { selectHistory, type ConversationExchange } from './conversation-history';
 
 export interface RagLimits {
   candidates: number;
@@ -29,12 +30,14 @@ export class RagPipeline {
     this.limits = { ...limits };
   }
 
-  async answer(query: string): Promise<CitedAnswer> {
+  async answer(query: string, history: readonly ConversationExchange[] = []): Promise<CitedAnswer> {
     const question = query.trim();
     if (!question) throw new Error('A non-empty query is required.');
-    const vector = await this.vectorize(question);
-    const candidates = await this.retrieval.retrieve(question, vector, this.limits.candidates);
-    const ranked = await this.reranker.rerank(question, candidates, this.limits.contextChunks);
+    const exchanges = selectHistory(history).exchanges;
+    const searchQuery = [...exchanges.map((exchange) => exchange.question), question].join('\n');
+    const vector = await this.vectorize(searchQuery);
+    const candidates = await this.retrieval.retrieve(searchQuery, vector, this.limits.candidates);
+    const ranked = await this.reranker.rerank(searchQuery, candidates, this.limits.contextChunks);
     const context: CitedChunk[] = [];
     for (const candidate of ranked) {
       const chunk = this.chunks.get(candidate.chunkId);
@@ -47,6 +50,6 @@ export class RagPipeline {
       if (cost > this.limits.contextTokens) continue;
       context.push(item);
     }
-    return this.answerer.answer(question, context);
+    return this.answerer.answer(question, context, exchanges);
   }
 }

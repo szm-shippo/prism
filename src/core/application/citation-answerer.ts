@@ -1,6 +1,7 @@
 import type { ChunkRegistry } from '../index/chunk-registry';
 import type { LLMProvider } from '../provider/llm-provider';
 import { QueryAnswerer } from './query-answerer';
+import type { ConversationExchange } from './conversation-history';
 
 export interface CitedChunk {
   chunkId: string;
@@ -28,7 +29,7 @@ export class CitationAnswerer {
     private readonly sourceExists: (path: string) => boolean,
   ) {}
 
-  async answer(query: string, usedChunks: readonly CitedChunk[]): Promise<CitedAnswer> {
+  async answer(query: string, usedChunks: readonly CitedChunk[], history: readonly ConversationExchange[] = []): Promise<CitedAnswer> {
     if (new Set(usedChunks.map(({ chunkId }) => chunkId)).size !== usedChunks.length ||
         usedChunks.some(({ chunkId, sourceId }) => !chunkId.trim() || !sourceId.trim())) {
       throw new Error('Cited chunks need unique chunk IDs and source IDs.');
@@ -43,7 +44,7 @@ export class CitationAnswerer {
         }, ...request.messages],
       }),
     });
-    const response = await answerer.answer(query, context);
+    const response = await answerer.answer(query, context, history);
     const available = new Map(usedChunks.map((chunk) => [chunk.chunkId, chunk.sourceId]));
     const citations = new Map<string, SourceCitation>();
     const content = response.replace(/\[cite:([^\]\r\n]+)\]/gu, (_marker, chunkId: string) => {

@@ -52,3 +52,20 @@ test('pipeline rejects empty queries and conflicting candidate provenance', asyn
     { rerank: async () => [] }, { get: () => undefined }, { answer: async () => ({}) },
     { candidates: 1, contextChunks: 0, contextTokens: 1 }), /Positive RAG/);
 });
+
+test('follow-ups retrieve fresh evidence with retained questions and never use past AI answers as search evidence', async () => {
+  const searches = [];
+  const answers = [];
+  const pipeline = new RagPipeline(async (query) => { searches.push(query); return []; },
+    { retrieve: async (query) => { searches.push(query); return [{ chunkId: 'fresh', sourceId: 'source', score: 1 }]; } },
+    { rerank: async (_query, candidates) => candidates },
+    { get: () => ({ chunk_id: 'fresh', source_id: 'source', content: 'Fresh Vault fact' }) },
+    { answer: async (...args) => { answers.push(args); return { content: 'grounded', citations: [] }; } });
+  const history = [{ question: 'What is Prism?', answer: 'Unsupported AI claim' }];
+  await pipeline.answer('Tell me more', history);
+  assert.deepEqual(searches, ['What is Prism?\nTell me more', 'What is Prism?\nTell me more']);
+  assert.deepEqual(answers[0], ['Tell me more', [{ chunkId: 'fresh', sourceId: 'source', content: 'Fresh Vault fact' }], history]);
+  await pipeline.answer('New topic');
+  assert.equal(searches.at(-1), 'New topic');
+  assert.deepEqual(answers.at(-1)[2], []);
+});

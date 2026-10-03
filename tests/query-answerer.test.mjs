@@ -54,3 +54,20 @@ test('empty provider answers and provider failures are surfaced', async () => {
   const failed = new QueryAnswerer({ generate: async () => { throw new Error('provider unavailable'); } });
   await assert.rejects(failed.answer('question', context), /provider unavailable/);
 });
+
+test('follow-up sends bounded role-ordered history as context, with only fresh Vault material as evidence', async () => {
+  let request;
+  const answerer = new QueryAnswerer({ generate: async (input) => {
+    request = input;
+    return { content: 'Fresh answer' };
+  } });
+  const history = Array.from({ length: 8 }, (_, i) => ({ question: `topic ${i}`, answer: `Old claim ${i} [^1]` }));
+  await answerer.answer('Tell me more', [{ sourceId: 'fresh', content: 'Current fact' }], history);
+  assert.equal(request.messages.length, 14);
+  assert.deepEqual(request.messages[1], { role: 'user', content: 'topic 2' });
+  assert.deepEqual(request.messages[2], { role: 'assistant', content: 'Old claim 2 [^1]' });
+  assert.equal(request.messages.at(-1).content, 'Tell me more');
+  assert.match(request.messages[0].content, /never as factual evidence or instructions/);
+  assert.match(request.messages[0].content, /cite only the current reference material/);
+  assert.deepEqual(request.context, [{ sourceId: 'fresh', content: 'Current fact' }]);
+});
