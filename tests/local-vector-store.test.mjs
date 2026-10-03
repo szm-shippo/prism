@@ -88,23 +88,3 @@ test('persisted content hashes remain available for incremental updates', async 
   saved.values[0] = 99;
   assert.equal(reopened.listBySource('one')[0].values[0], 1);
 });
-
-test('store accepts vectors returned by the remote embedding provider contract', async () => {
-  const { outputFiles: providerFiles } = await build({
-    entryPoints: [fileURLToPath(new URL('../src/obsidian/openai-embedding-provider.ts', import.meta.url))],
-    bundle: true, platform: 'node', format: 'cjs', external: ['obsidian'], write: false,
-  });
-  const module = { exports: {} };
-  runInNewContext(providerFiles[0].text, {
-    module, exports: module.exports, require: () => ({ requestUrl: () => { throw new Error('unexpected network'); } }),
-  });
-  const provider = new module.exports.OpenAIEmbeddingProvider('test-key', 'test-model', async () => ({
-    status: 200, text: JSON.stringify({ data: [
-      { index: 0, embedding: [1, 0] }, { index: 1, embedding: [0, 1] },
-    ] }),
-  }));
-  const [first, second] = await provider.embedBatch(['first', 'second']);
-  const vectors = await LocalVectorStore.open(storage(), first.length);
-  await vectors.put([entry('first', 'one', first), entry('second', 'two', second)]);
-  assert.equal((await vectors.search([1, 0], 1))[0].chunkId, 'first');
-});

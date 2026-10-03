@@ -1,4 +1,4 @@
-import { Modal, Notice, Plugin, PluginSettingTab, Setting, TFile } from 'obsidian';
+import { Notice, Plugin, PluginSettingTab, Setting, TFile } from 'obsidian';
 import { CitationAnswerer, type CitedAnswer, type SourceCitation } from '../core/application/citation-answerer';
 import { RagPipeline } from '../core/application/rag-pipeline';
 import type { ConversationExchange } from '../core/application/conversation-history';
@@ -12,7 +12,6 @@ import { HybridRetrieval } from '../core/index/hybrid-retrieval';
 import { RetrievalReranker } from '../core/index/retrieval-reranker';
 import { isExcludedPath, parseExcludedPaths } from '../core/index/exclusion-rules';
 import { SourceEventHandler } from './source-events';
-import { OpenAIEmbeddingProvider } from './openai-embedding-provider';
 import { OpenAILLMProvider } from './openai-llm-provider';
 import { CodexAuth, CodexModelListError, type DevicePrompt } from './codex-auth';
 import { CodexLLMProvider } from './codex-llm-provider';
@@ -49,6 +48,17 @@ export default class PrismPlugin extends Plugin {
     this.savedData = typeof loaded === 'object' && loaded !== null && !Array.isArray(loaded)
       ? loaded as Record<string, unknown> : {};
     this.settings = loadSettings(this.savedData);
+    const legacySettings = ['allowRemoteEmbeddingIndexing', 'embeddingModel']
+      .some((key) => Object.prototype.hasOwnProperty.call(this.savedData, key)) || this.savedData.searchMode === 'openai';
+    const obsoleteVectors = (this.savedData.vectorIndex != null || this.savedData.vectorIndexModel != null) &&
+      this.savedData.vectorIndexModel !== LOCAL_MODEL_KEY;
+    if (this.app.secretStorage.getSecret('prism-embedding-api-key')) {
+      this.app.secretStorage.setSecret('prism-embedding-api-key', '');
+    }
+    if (legacySettings || obsoleteVectors) {
+      await this.savePluginData({ searchMode: this.settings.searchMode,
+        ...(obsoleteVectors ? { vectorIndex: null, vectorIndexModel: null } : {}) });
+    }
     if (this.manifest.dir && this.app.vault.adapter) {
       this.localModel = new LocalEmbeddingModel(this.app.vault.adapter, this.manifest.dir);
       this.localEmbeddings = new LocalEmbeddingProvider(this.localModel);
@@ -78,7 +88,7 @@ export default class PrismPlugin extends Plugin {
     const vectorStorage = {
       load: async () => this.savedData.vectorIndex,
       save: async (state: VectorStoreState) => {
-        await this.savePluginData({ vectorIndex: state, vectorIndexModel: this.embeddingKey });
+        await this.savePluginData({ vectorIndex: state, vectorIndexModel: LOCAL_MODEL_KEY });
       },
     };
     const getVectorStore = async (dimensions?: number): Promise<LocalVectorStore | undefined> => {
@@ -87,7 +97,7 @@ export default class PrismPlugin extends Plugin {
       if (target === undefined) return undefined;
       if (typeof target !== 'number') throw new Error('Vector index dimensions are invalid.');
       if (dimensions !== undefined && typeof this.savedData.vectorIndexModel === 'string' &&
-          this.savedData.vectorIndexModel !== this.embeddingKey) {
+          this.savedData.vectorIndexModel !== LOCAL_MODEL_KEY) {
         throw new Error('Embedding model changed; rebuild the vector index.');
       }
       if (!this.vectorStore || this.vectorStore.dimensions !== target) {
@@ -100,30 +110,14 @@ export default class PrismPlugin extends Plugin {
         const generation = this.embeddingGeneration;
         if (this.settings.searchMode === 'local') {
           if (!this.localEmbeddings) throw new LocalEmbeddingError('Local embedding runtime is unavailable. Reinstall Prism.');
-          if (this.savedData.vectorIndexModel && this.savedData.vectorIndexModel !== this.embeddingKey) {
+          if (this.savedData.vectorIndexModel && this.savedData.vectorIndexModel !== LOCAL_MODEL_KEY) {
             throw new Error('Search model changed. Rebuild the index.');
           }
           const vectors = await this.localEmbeddings.embedBatch(texts);
           if (generation !== this.embeddingGeneration) throw new Error('Search settings changed. Rebuild the index.');
           return vectors;
         }
-        if (!this.remoteEmbeddingEnabled) {
-          throw new Error('Remote embedding indexing is not enabled.');
-        }
-        const key = this.app.secretStorage.getSecret('prism-embedding-api-key');
-        if (!key || !this.settings.embeddingModel.trim()) {
-          throw new Error('Configure an embedding model and API key before remote indexing.');
-        }
-        if (typeof this.savedData.vectorIndexModel === 'string' &&
-            this.savedData.vectorIndexModel !== this.embeddingKey) {
-          throw new Error('Embedding model changed; rebuild the vector index.');
-        }
-        const model = this.settings.embeddingModel;
-        const vectors = await new OpenAIEmbeddingProvider(key, model).embedBatch(texts);
-        if (!this.remoteEmbeddingEnabled || this.settings.embeddingModel !== model || generation !== this.embeddingGeneration) {
-          throw new Error('Embedding settings changed during indexing.');
-        }
-        return vectors;
+        throw new Error('Local embedding indexing is not enabled.');
       },
     }, getVectorStore);
     const localIndexes = {
@@ -135,12 +129,12 @@ export default class PrismPlugin extends Plugin {
     };
     const indexUpdates = {
       sync: async (sourceId: string): Promise<void> => {
-        if ((this.settings.searchMode === 'local' || this.remoteEmbeddingEnabled) &&
-            this.savedData.vectorIndex && this.savedData.vectorIndexModel !== this.embeddingKey) {
+        if (this.settings.searchMode === 'local' &&
+            this.savedData.vectorIndex && this.savedData.vectorIndexModel !== LOCAL_MODEL_KEY) {
           await localIndexes.sync(sourceId);
           throw new LocalEmbeddingError('Vector index uses another model. Rebuild the index in Prism settings.');
         }
-        if (this.settings.searchMode === 'local' || this.remoteEmbeddingEnabled) {
+        if (this.settings.searchMode === 'local') {
           await semanticIndexes.sync(sourceId);
         } else {
           await localIndexes.sync(sourceId);
@@ -201,7 +195,7 @@ export default class PrismPlugin extends Plugin {
       if (this.settings.searchMode === 'full-text') return [];
       if (this.settings.searchMode === 'local') {
         if (!this.localEmbeddings) throw new LocalEmbeddingError('Local embedding runtime is unavailable. Reinstall Prism.');
-        if (this.savedData.vectorIndexModel !== this.embeddingKey) {
+        if (this.savedData.vectorIndexModel !== LOCAL_MODEL_KEY) {
           throw new LocalEmbeddingError('Local vector index is missing or uses another model. Rebuild the index in Prism settings.');
         }
         const generation = this.embeddingGeneration;
@@ -209,14 +203,7 @@ export default class PrismPlugin extends Plugin {
         if (generation !== this.embeddingGeneration) throw new Error('Search settings changed. Retry the question.');
         return vector;
       }
-      if (!this.remoteEmbeddingEnabled || this.savedData.vectorIndexModel !== this.embeddingKey) return [];
-      const store = await getVectorStore();
-      const key = this.app.secretStorage.getSecret('prism-embedding-api-key');
-      if (!store || !key || !this.settings.embeddingModel.trim()) return [];
-      const generation = this.embeddingGeneration;
-      const vector = await new OpenAIEmbeddingProvider(key, this.settings.embeddingModel).embed(query);
-      if (generation !== this.embeddingGeneration) throw new Error('Search settings changed. Retry the question.');
-      return vector;
+      return [];
     }, retrieval, reranker, { get: allowedChunk }, answerer);
     this.registerEvent(this.app.vault.on('create', (file) => {
       return sourceEvents.create(file).catch(() => new Notice('Prism could not index a Markdown source. Check embedding settings and plugin storage.'));
@@ -365,10 +352,6 @@ export default class PrismPlugin extends Plugin {
       new Notice('Prism index rebuild is already in progress.');
       return;
     }
-    if (this.remoteEmbeddingEnabled) {
-      new RebuildConfirmModal(this.app, () => this.runRebuild()).open();
-      return;
-    }
     return this.runRebuild();
   }
 
@@ -396,40 +379,17 @@ export default class PrismPlugin extends Plugin {
     this.settings = { ...this.settings, showVaultNotice: value };
   }
 
-  async setEmbeddingModel(value: string): Promise<void> {
-    if (this.rebuildPromise) throw new Error('Wait for rebuild before changing the embedding model.');
-    const embeddingModel = value.trim();
-    if (embeddingModel !== this.settings.embeddingModel) {
-      this.embeddingGeneration++;
-      const change = async () => {
-        await this.savePluginData(this.settings.searchMode === 'local' ? { embeddingModel }
-          : { embeddingModel, vectorIndex: null, vectorIndexModel: null });
-        if (this.settings.searchMode !== 'local') this.vectorStore = undefined;
-        this.settings = { ...this.settings, embeddingModel };
-      };
-      await this.sourceEvents?.configureIndexes(change);
-    }
-  }
-
-  private get embeddingKey(): string {
-    return this.settings.searchMode === 'local' ? LOCAL_MODEL_KEY : this.settings.embeddingModel;
-  }
-
-  private get remoteEmbeddingEnabled(): boolean {
-    return this.settings.searchMode === 'openai' && this.settings.allowRemoteEmbeddingIndexing;
-  }
-
   async setSearchMode(searchMode: PluginSettings['searchMode']): Promise<void> {
-    if (!['full-text', 'local', 'openai'].includes(searchMode)) throw new Error('Unknown search mode.');
+    if (!['full-text', 'local'].includes(searchMode)) throw new Error('Unknown search mode.');
     if (this.rebuildPromise) throw new Error('Wait for the rebuild to finish before changing search mode.');
     if (searchMode === this.settings.searchMode) return;
     this.embeddingGeneration++;
     this.localEmbeddings?.dispose();
     await this.sourceEvents?.configureIndexes(async () => {
-      await this.savePluginData({ searchMode, allowRemoteEmbeddingIndexing: searchMode === 'openai',
+      await this.savePluginData({ searchMode,
         vectorIndex: null, vectorIndexModel: null });
       this.vectorStore = undefined;
-      this.settings = { ...this.settings, searchMode, allowRemoteEmbeddingIndexing: searchMode === 'openai' };
+      this.settings = { ...this.settings, searchMode };
     });
   }
 
@@ -475,16 +435,8 @@ export default class PrismPlugin extends Plugin {
     this.settings = { ...this.settings, codexModel };
   }
 
-  setEmbeddingApiKey(value: string): void {
-    this.app.secretStorage.setSecret('prism-embedding-api-key', value.trim());
-  }
-
   setLlmApiKey(value: string): void {
     this.app.secretStorage.setSecret('prism-llm-api-key', value.trim());
-  }
-
-  hasEmbeddingApiKey(): boolean {
-    return Boolean(this.app.secretStorage.getSecret('prism-embedding-api-key'));
   }
 
   hasLlmApiKey(): boolean {
@@ -494,6 +446,8 @@ export default class PrismPlugin extends Plugin {
   private async savePluginData(changes: Record<string, unknown>): Promise<void> {
     const write = this.dataWrite.then(async () => {
       const updated = { ...this.savedData, ...changes };
+      delete updated.allowRemoteEmbeddingIndexing;
+      delete updated.embeddingModel;
       await this.saveData(updated);
       this.savedData = updated;
     });
@@ -558,16 +512,15 @@ class PrismSettingTab extends PluginSettingTab {
     }
 
     containerEl.createEl('p', {
-      text: 'Remote processing: OpenAI receives Markdown or chunk text for embeddings when enabled, and your query plus retained previous questions for vector search when a consented vector index exists. For answers, your selected OpenAI connection receives your query, up to 6 recent question/answer pairs (12,000 UTF-8 bytes), plus retrieved source IDs, chunk IDs, and text. API-key answers go to https://api.openai.com/v1/responses; ChatGPT (Codex) answers go to https://chatgpt.com/backend-api/codex/responses. This data leaves your Vault for those requests.',
+      text: 'Remote processing: Search indexing and query embeddings run on this device. For answers, your selected OpenAI connection receives your query, up to 6 recent question/answer pairs (12,000 UTF-8 bytes), plus retrieved source IDs, chunk IDs, and text. API-key answers go to https://api.openai.com/v1/responses; ChatGPT (Codex) answers go to https://chatgpt.com/backend-api/codex/responses. This data leaves your Vault for those requests.',
     });
 
     new Setting(containerEl)
       .setName('Search method')
-      .setDesc('Local full-text sends no search data. Local Embedding runs on this device. Choosing OpenAI consents to sending new/changed chunks and search questions to https://api.openai.com/v1/embeddings (API charges apply). Changing method clears vectors; rebuild to include existing notes. Answers still send retrieved text to the selected LLM.')
+      .setDesc('Local full-text sends no search data. Local Embedding runs on this device. Changing method clears vectors; rebuild to include existing notes. Answers still send retrieved text to the selected LLM.')
       .addDropdown((dropdown) => dropdown
         .addOption('full-text', 'Local full-text')
         .addOption('local', 'Local Embedding (multilingual, WASM)')
-        .addOption('openai', 'OpenAI Embedding (send search data)')
         .setValue(this.prism.settings.searchMode)
         .onChange(async (value) => {
           try {
@@ -593,20 +546,6 @@ class PrismSettingTab extends PluginSettingTab {
       .addButton((button) => button.setButtonText('Cancel download')
         .setDisabled(!this.prism.localModelBusy())
         .onClick(() => this.prism.cancelLocalModelDownload()));
-
-    new Setting(containerEl)
-      .setName('Embedding model')
-      .setDesc('OpenAI model ID used for embeddings.')
-      .addText((text) => text
-        .setPlaceholder('Model ID')
-        .setValue(this.prism.settings.embeddingModel)
-        .onChange(async (value) => {
-          try {
-            await this.prism.setEmbeddingModel(value);
-          } catch {
-            new Notice('Prism could not save the embedding model. Try again.');
-          }
-        }));
 
     new Setting(containerEl)
       .setName('LLM connection')
@@ -730,8 +669,6 @@ class PrismSettingTab extends PluginSettingTab {
       }
     }
 
-    this.addApiKeySetting('Embedding API key', this.prism.hasEmbeddingApiKey(),
-      (value) => this.prism.setEmbeddingApiKey(value));
     this.addApiKeySetting('LLM API key', this.prism.hasLlmApiKey(),
       (value) => this.prism.setLlmApiKey(value));
 
@@ -763,7 +700,7 @@ class PrismSettingTab extends PluginSettingTab {
         }));
     new Setting(containerEl)
       .setName('Rebuild index')
-      .setDesc('Recreate search indexes from Vault Markdown. If remote embedding indexing is enabled, this sends Markdown chunks to OpenAI.')
+      .setDesc('Recreate search indexes from Vault Markdown on this device. No Vault text is sent for indexing.')
       .addButton((button) => button
         .setButtonText('Rebuild')
         .setDisabled(status.state === 'rebuilding')
@@ -801,24 +738,5 @@ class PrismSettingTab extends PluginSettingTab {
             new Notice('Prism could not clear the API key. Try again.');
           }
         }));
-  }
-}
-
-class RebuildConfirmModal extends Modal {
-  constructor(app: PrismPlugin['app'], private readonly confirm: () => Promise<void>) {
-    super(app);
-  }
-
-  onOpen(): void {
-    this.contentEl.createEl('h2', { text: 'Rebuild Prism index?' });
-    this.contentEl.createEl('p', {
-      text: 'Remote embedding indexing is enabled. Rebuilding sends Markdown chunks from included Vault notes to https://api.openai.com/v1/embeddings to recreate the search index.',
-    });
-    new Setting(this.contentEl)
-      .addButton((button) => button.setButtonText('Cancel').onClick(() => this.close()))
-      .addButton((button) => button.setButtonText('Rebuild').onClick(() => {
-        this.close();
-        return this.confirm();
-      }));
   }
 }

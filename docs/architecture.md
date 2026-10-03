@@ -40,9 +40,9 @@ Markdown の削除イベントでは対象 Source の Chunk を除いてから R
 
 `retrieval-reranker.ts` は候補の Chunk 本文とクエリを照合し、初期実装では語句の出現回数で並べ直す。追加の外部送信を伴わず Mobile でも使える方式として選んだ。評価エラーや Chunk 不在時は元の Hybrid Retrieval 順へ戻し、指定された Top-N に絞る。スコア付け処理は差し替え可能だが、モデルによる最適化はこの段階では行わない。
 
-Vault の作成・変更・削除イベントは Chunk Registry の更新後にローカル全文検索へ反映する。設定画面の「Send changed chunks to OpenAI for search indexing」は既定でオフにし、利用者がオンにした後の Vault イベントだけで、EmbeddingProvider を通じて `https://api.openai.com/v1/embeddings` に Chunk 本文を送る。オンにしただけでは既存 Note を送らない。オフの間も全文検索は更新し、変更・削除された Source の古い Vector を除く。`index-update-orchestrator.ts` は保存済み Vector の Chunk ID と内容ハッシュを比較し、新規・変更 Chunk のみを送信する。失敗時は現在の全文検索を保ち、古い Vector を残さず、次のイベントで再試行できる。Embedding モデルの変更時は、異なるモデルの Vector を混在させないため、派生 Vector インデックスを消去する。
+Vault の作成・変更・削除イベントは Chunk Registry の更新後にローカル全文検索へ反映する。Local Embedding 選択時は端末内の EmbeddingProvider で Vector も更新する。`index-update-orchestrator.ts` は保存済み Vector の Chunk ID と内容ハッシュを比較し、新規・変更 Chunk のみをベクトル化する。失敗時は現在の全文検索を保ち、古い Vector を残さず、次のイベントで再試行できる。OpenAI Embeddings API への通信経路は持たない。
 
-全再構築は Vault イベントと直列に実行し、派生した Source Registry、Chunk Registry、全文検索、Vector を消去してから Vault の Markdown を再走査する。失敗時は途中までの派生状態を残してエラーを返し、再実行時に最初から作り直す。Vault Markdown は書き換えない。Vector の再生成はリモート索引への明示的な同意と Embedding 設定がある場合だけ行う。
+全再構築は Vault イベントと直列に実行し、派生した Source Registry、Chunk Registry、全文検索、Vector を消去してから Vault の Markdown を再走査する。失敗時は途中までの派生状態を残してエラーを返し、再実行時に最初から作り直す。Vault Markdown は書き換えない。Local Embedding の再生成は選択時だけ行い、モデルの準備状態を索引消去前に確認する。
 
 ## Markdown Chunker
 
@@ -52,7 +52,7 @@ Vault の作成・変更・削除イベントは Chunk Registry の更新後に�
 
 `src/core/provider/embedding-provider.ts` は単一テキストと複数テキストのベクトル化を定義する。バッチ結果は入力と同じ順序・件数とし、空入力の結果は空配列とする。`model.id` はモデル識別子、`model.dimensions` は事前に分かる場合のベクトル次元数である。通信方法と実際のモデルは実装側が決める。
 
-初期の具体実装は `src/obsidian/openai-embedding-provider.ts` とし、Obsidian の `requestUrl` から OpenAI の `/v1/embeddings` へ、指定されたテキストとモデル ID を送る。API キーとモデルは呼び出し側から渡す。応答本文や通信例外はエラーメッセージに含めない。送信先は固定し、Vault の他の内容は読み取らない。
+具体実装は `src/obsidian/local-embedding-provider.ts` とする。旧 OpenAI Provider・接続処理・専用設定は Issue #79 で削除し、旧設定は全文検索へ移行する。起動時に専用 Secret Storage キーを空にし、現行ローカルモデルと一致しない Vector 索引は開く前に破棄する。回答生成用の認証情報と全文検索索引は保持する。
 
 Issue #68 の LocalEmbeddingProvider も同じ境界を実装し、モデル導入を担う Obsidian DataAdapter と推論用 Worker を接続する。推論 Worker はブラウザー用ランタイムを独立した成果物として持ち、通信を無効にする。設定変更と索引更新・再構築を同じイベントキューで順序付け、実行中に設定が変わった推論結果を破棄する。モデルとランタイムの配布、負荷と検証記録は [ローカル Embedding](local-embedding.md) を参照する。
 
@@ -70,11 +70,11 @@ Provider 設定 UI はモデル ID をプラグイン設定データへ保存し
 
 ## RAG Pipeline
 
-`RagPipeline` は query のベクトル化、Hybrid Retrieval、rerank、context 構築、回答生成、出典付与を接続する。context は上位の完全な chunk を選び、JSON 化した UTF-8 バイト数を保守的な token 上限として使う。初期値は候補 20 件、context 最大 6 chunk、上限 6000 とし、ここでの実装値であって製品仕様の固定値ではない。検索方式は全文検索・Local Embedding・OpenAI Embedding から明示的に選ぶ。OpenAI のベクトル検索は同意済みの現行モデルの索引と認証情報が揃う場合だけ行う。Local Embedding は端末内 Provider でベクトル化し、モデルや索引の欠落・不整合は修復・再構築を案内するエラーとして扱う。回答に使う chunk の source は現在の Vault で存在を確認する。
+`RagPipeline` は query のベクトル化、Hybrid Retrieval、rerank、context 構築、回答生成、出典付与を接続する。context は上位の完全な chunk を選び、JSON 化した UTF-8 バイト数を保守的な token 上限として使う。初期値は候補 20 件、context 最大 6 chunk、上限 6000 とし、ここでの実装値であって製品仕様の固定値ではない。検索方式は全文検索・Local Embedding から明示的に選ぶ。Local Embedding は端末内 Provider でベクトル化し、モデルや索引の欠落・不整合は修復・再構築を案内するエラーとして扱う。回答に使う chunk の source は現在の Vault で存在を確認する。
 
 ## Index Controls
 
-設定画面の Advanced 領域は登録済み source と chunk の件数、再構築の状態を表示する。再構築は Vault Markdown から派生インデックスを作り直す既存の処理を呼び出し、失敗時は再試行できる。リモート embedding の同意が有効な場合に Markdown chunk が OpenAI に送信されることを操作位置に表示する。
+設定画面の Advanced 領域は登録済み source と chunk の件数、再構築の状態を表示する。再構築は Vault Markdown から派生インデックスを作り直す既存の処理を呼び出し、失敗時は再試行できる。再構築は端末内で実行し、Markdown chunk を外部 API へ送信しない。
 
 除外設定は Vault 相対のファイルまたはフォルダパスを 1 行ずつ受け付ける。フォルダ指定は配下にも適用し、比較は Vault パスと同じ大文字・小文字で行う。設定適用時に該当する source、chunk、全文・ベクトル索引を削除し、新規イベント、移動、再構築でも対象を読み込まない。削除が失敗して派生データが残っても、RAG の候補選択で除外し外部の回答処理へ渡さない。除外を解除した後は明示的な再構築で再登録する。
 
@@ -86,6 +86,6 @@ Provider 設定 UI はモデル ID をプラグイン設定データへ保存し
 
 `src/obsidian/codex-auth.ts` は Codex Device Code の取得、承認待ち、認可コード交換、トークン更新とアカウント別モデル一覧の取得を担当する。Obsidian の `requestUrl` を使い、Node.js のローカル HTTP リスナーに依存しない。Device Code の承認待ちには期限とキャンセルを設け、取り消した試行から資格情報を保存しない。応答に ID トークンが含まれる場合は OpenAI の JWKS で署名、発行者、クライアント ID、期限を確認する。アクセストークン、更新トークン、アカウント ID、有効期限はデバイスごとの Secret Storage にまとめて保存し、通常のプラグイン設定データや Vault Markdown に置かない。更新時に別アカウントの ID が返れば既存の資格情報を置き換えない。
 
-設定の `llmConnection` は回答に使う接続を明示し、既定は従来の API キー接続とする。ChatGPT 接続が失敗しても API キーへ自動的に切り替えない。Embedding とベクトル検索の遠隔送信は引き続き専用 API キーと明示的な同意に従う。
+設定の `llmConnection` は回答に使う接続を明示し、既定は従来の API キー接続とする。ChatGPT 接続が失敗しても API キーへ自動的に切り替えない。Embedding とベクトル検索は端末内で処理する。
 
 `src/obsidian/codex-llm-provider.ts` は既存の LLMProvider 境界を実装し、回答に必要な質問と選択済み context を `https://chatgpt.com/backend-api/codex/responses` へ送る。SSE の `response.completed` を受け取るまで回答を成功扱いにしない。これは Codex との実験的な第三者互換経路で、公開の Sign in with ChatGPT Responses API 契約とは異なる。OpenAI 側の変更で動作しなくなる可能性があるため、利用者向け設定と README に送信先と制約を示す。
