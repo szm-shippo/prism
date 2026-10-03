@@ -619,7 +619,7 @@ test('ChatGPT Ask sends the selected model when the optional model list is unava
   assert.equal(JSON.parse(requests[1].body).model, 'gpt-5.5');
 });
 
-test('refreshed Codex models become a dropdown and selection changes the tested model', async () => {
+test('settings automatically load Codex models, preserve the saved selection and reuse the cache', async () => {
   const secrets = new Map([['prism-codex-credential', JSON.stringify({
     accessToken: 'test-access', refreshToken: 'test-refresh', accountId: 'account-1',
     expiresAt: Date.now() + 3600_000,
@@ -634,7 +634,9 @@ test('refreshed Codex models become a dropdown and selection changes the tested 
   tabs[0].display();
   assert.equal(tabs[0].containerEl.children.find((child) => child.name === 'Codex model').text.value,
     'saved-model');
-  await tabs[0].containerEl.children.find((child) => child.name === 'Codex models').button.click();
+  await new Promise(setImmediate);
+  tabs[0].display();
+  assert.equal(requests.filter((request) => request.url.includes('/codex/models')).length, 1);
   const modelSetting = tabs[0].containerEl.children.find((child) => child.name === 'Codex model');
   assert.deepEqual([...modelSetting.dropdown.options], [
     ['saved-model', 'saved-model (saved model)'], ['gpt-5.5', 'gpt-5.5'],
@@ -1348,4 +1350,69 @@ test('API keys use Secret Storage and are never shown or saved as plugin data', 
   assert.match(configured.description, /Configured/);
   configured.button.click();
   assert.equal(first.storedSecrets.get('prism-embedding-api-key'), '');
+});
+
+
+test('automatic model failure and empty response stop retries until manual refresh', async () => {
+  for (const initial of [{ status: 503, text: 'private response' },
+    { status: 200, text: JSON.stringify({ models: [] }) }]) {
+    const secrets = new Map([['prism-codex-credential', JSON.stringify({
+      accessToken: 'test-access', refreshToken: 'test-refresh', accountId: 'account-1',
+      expiresAt: Date.now() + 3600_000,
+    })]]);
+    let response = initial;
+    const { plugin, tabs, requests } = await loadPlugin({ llmConnection: 'chatgpt-codex', codexModel: 'saved' },
+      false, secrets, (request) => request.url.includes('/codex/models') ? response : undefined);
+    const setting = (name) => tabs[0].containerEl.children.find((child) => child.name === name);
+    tabs[0].display();
+    tabs[0].display();
+    await new Promise(setImmediate);
+    tabs[0].display();
+    await new Promise(setImmediate);
+    assert.equal(requests.filter((request) => request.url.includes('/codex/models')).length, 1);
+    assert.match(setting('Codex models').description, /Could not load/);
+    assert.doesNotMatch(setting('Codex models').description, /private response|test-access/);
+    assert.equal(plugin.settings.codexModel, 'saved');
+    response = { status: 200, text: JSON.stringify({ models: [{ slug: 'fresh', visibility: 'list' }] }) };
+    await setting('Codex models').button.click();
+    assert.equal(setting('Codex model').dropdown.value, 'saved');
+    assert.ok(setting('Codex model').dropdown.options.has('fresh'));
+    response = initial;
+    await setting('Codex models').button.click();
+    assert.ok(setting('Codex model').dropdown.options.has('fresh'));
+    assert.equal(plugin.settings.codexModel, 'saved');
+    plugin.signOutCodex();
+    tabs[0].display();
+    await new Promise(setImmediate);
+    assert.equal(plugin.getCodexStatus().models.length, 0);
+    assert.equal(requests.filter((request) => request.url.includes('/codex/models')).length, 3);
+  }
+});
+
+
+test('model loading disables duplicate refresh and does not redraw hidden or signed-out settings', async () => {
+  for (const action of ['hide', 'sign-out']) {
+    const secrets = new Map([['prism-codex-credential', JSON.stringify({
+      accessToken: 'test-access', refreshToken: 'test-refresh', accountId: 'account-1',
+      expiresAt: Date.now() + 3600_000,
+    })]]);
+    let release;
+    const { plugin, tabs, requests } = await loadPlugin({ llmConnection: 'chatgpt-codex' }, false, secrets,
+      (request) => request.url.includes('/codex/models') ? new Promise((resolve) => { release = resolve; }) : undefined);
+    tabs[0].display();
+    await new Promise(setImmediate);
+    const settings = tabs[0].containerEl;
+    const button = settings.children.find((child) => child.name === 'Codex models').button;
+    assert.equal(button.disabled, true);
+    await button.click();
+    tabs[0].display();
+    assert.equal(requests.filter((request) => request.url.includes('/codex/models')).length, 1);
+    if (action === 'hide') tabs[0].hide();
+    else { plugin.signOutCodex(); tabs[0].display(); }
+    const children = settings.children;
+    release({ status: 200, text: JSON.stringify({ models: [{ slug: 'late', visibility: 'list' }] }) });
+    await new Promise(setImmediate);
+    assert.equal(settings.children, children);
+    if (action === 'sign-out') assert.equal(plugin.getCodexStatus().models.length, 0);
+  }
 });

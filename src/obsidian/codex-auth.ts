@@ -158,12 +158,24 @@ export class CodexAuth {
   private refreshPromise?: Promise<CodexCredential>;
   private generation = 0;
   private models?: string[];
+  private modelsPromise?: Promise<string[]>;
+  private modelState: 'idle' | 'loading' | 'ready' | 'error' = 'idle';
+  private modelError?: string;
 
   constructor(private readonly secrets: SecretStore, private readonly transport: Transport = requestUrl) {}
 
   get accountId(): string | undefined { return this.read()?.accountId; }
   get connected(): boolean { return this.read() !== undefined; }
   get availableModels(): readonly string[] { return this.models ?? []; }
+  get modelListState() { return this.modelState; }
+  get modelListError(): string | undefined { return this.modelError; }
+
+  private resetModels(): void {
+    this.models = undefined;
+    this.modelsPromise = undefined;
+    this.modelState = 'idle';
+    this.modelError = undefined;
+  }
 
   private read(): CodexCredential | undefined {
     const raw = this.secrets.getSecret(SECRET_ID);
@@ -179,7 +191,7 @@ export class CodexAuth {
     this.pending?.abort();
     this.pending = undefined;
     this.generation += 1;
-    this.models = undefined;
+    this.resetModels();
     this.secrets.setSecret(SECRET_ID, '');
   }
 
@@ -209,7 +221,7 @@ export class CodexAuth {
           if (controller.signal.aborted || generation !== this.generation) throw new Error('Authentication canceled.');
           this.generation += 1;
           this.save(credential);
-          this.models = undefined;
+          this.resetModels();
         }).finally(() => { if (this.pending === controller) this.pending = undefined; });
       return { userCode, verificationUrl: `${AUTH_ORIGIN}/codex/device`, complete,
         cancel: () => controller.abort() };
@@ -258,9 +270,33 @@ export class CodexAuth {
     return { token: current.accessToken, accountId: current.accountId };
   }
 
-  async listModels(force = false): Promise<string[]> {
-    if (this.models && !force) return this.models;
+  listModels(force = false): Promise<string[]> {
+    if (this.modelsPromise) return this.modelsPromise;
+    if (this.models && !force) return Promise.resolve(this.models);
+    const generation = this.generation;
+    const accountId = this.accountId;
+    this.modelState = 'loading';
+    this.modelError = undefined;
+    const promise = this.fetchModels(generation, accountId).catch((error: unknown) => {
+      if (generation === this.generation && accountId === this.accountId) {
+        this.modelState = 'error';
+        this.modelError = error instanceof CodexModelListError
+          ? error.message : 'Could not load Codex models. Reconnect or use Refresh models to try again.';
+      }
+      throw error;
+    }).finally(() => { if (this.modelsPromise === promise) this.modelsPromise = undefined; });
+    this.modelsPromise = promise;
+    return promise;
+  }
+
+  private async fetchModels(generation: number, accountId: string | undefined): Promise<string[]> {
+    const checkAccount = () => {
+      if (generation !== this.generation || !accountId || accountId !== this.accountId) {
+        throw new CodexModelListError('Codex model loading canceled: the account changed.');
+      }
+    };
     const access = await this.access();
+    checkAccount();
     const query = async (token: string, accountId: string) => {
       try {
         return await this.transport({ url: `https://chatgpt.com/backend-api/codex/models?client_version=${CODEX_CATALOG_CLIENT_VERSION}`,
@@ -270,7 +306,9 @@ export class CodexAuth {
     };
     let response = await query(access.token, access.accountId);
     if (response.status === 401) {
+      checkAccount();
       const renewed = await this.refreshAfterUnauthorized(access.token);
+      checkAccount();
       response = await query(renewed.token, renewed.accountId);
     }
     if (response.status < 200 || response.status >= 300) {
@@ -286,7 +324,9 @@ export class CodexAuth {
       .map((item) => item.slug)
       .filter((slug): slug is string => typeof slug === 'string' && slug.length > 0);
     if (available.length === 0) throw new CodexModelListError('Could not load Codex models: no listed models.');
+    checkAccount();
     this.models = available;
+    this.modelState = 'ready';
     return available;
   }
 

@@ -161,3 +161,51 @@ test('model catalog failure reports safe HTTP status without exposing response o
   });
   assert.equal(calls.length, 1);
 });
+
+
+test('model requests coalesce, refresh replaces cache and failure preserves it', async () => {
+  let release;
+  const { auth, secrets, calls } = harness(() => new Promise((resolve) => { release = resolve; }));
+  secrets.set('prism-codex-credential', JSON.stringify({ accessToken: token('account-1'),
+    refreshToken: 'refresh-1', accountId: 'account-1', expiresAt: Date.now() + 3600_000 }));
+  const first = auth.listModels();
+  const duplicate = auth.listModels(true);
+  await Promise.resolve();
+  assert.equal(calls.length, 1);
+  release({ status: 200, text: JSON.stringify({ models: [{ slug: 'first', visibility: 'list' }] }) });
+  await Promise.all([first, duplicate]);
+  assert.deepEqual(structuredClone(await auth.listModels()), ['first']);
+  assert.equal(calls.length, 1);
+  const refresh = auth.listModels(true);
+  await Promise.resolve();
+  release({ status: 200, text: JSON.stringify({ models: [{ slug: 'latest', visibility: 'list' }] }) });
+  await refresh;
+  const failed = auth.listModels(true);
+  await Promise.resolve();
+  release({ status: 503, text: 'private response' });
+  await assert.rejects(failed, /HTTP 503/);
+  assert.deepEqual(structuredClone(auth.availableModels), ['latest']);
+  assert.equal(auth.modelListState, 'error');
+});
+
+test('sign-out and account replacement discard late model results without affecting the new request', async () => {
+  const releases = [];
+  const { auth, secrets } = harness(() => new Promise((resolve) => releases.push(resolve)));
+  const connect = (accountId) => secrets.set('prism-codex-credential', JSON.stringify({
+    accessToken: token(accountId), refreshToken: 'refresh-1', accountId, expiresAt: Date.now() + 3600_000 }));
+  connect('account-1');
+  const old = auth.listModels();
+  await Promise.resolve();
+  auth.signOut();
+  assert.equal(auth.modelListState, 'idle');
+  connect('account-2');
+  const current = auth.listModels();
+  await Promise.resolve();
+  releases[0]({ status: 200, text: JSON.stringify({ models: [{ slug: 'old', visibility: 'list' }] }) });
+  await assert.rejects(old, /account changed/);
+  assert.equal(auth.availableModels.length, 0);
+  assert.equal(auth.modelListState, 'loading');
+  releases[1]({ status: 200, text: JSON.stringify({ models: [{ slug: 'new', visibility: 'list' }] }) });
+  await current;
+  assert.deepEqual(structuredClone(auth.availableModels), ['new']);
+});

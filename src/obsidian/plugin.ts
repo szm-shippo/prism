@@ -250,9 +250,10 @@ export default class PrismPlugin extends Plugin {
     this.prismSettingTab?.invalidateConnectionTest();
   }
 
-  getCodexStatus(): { accountId?: string; prompt?: DevicePrompt; models: readonly string[] } {
+  getCodexStatus(): { accountId?: string; prompt?: DevicePrompt; models: readonly string[]; modelState: 'idle' | 'loading' | 'ready' | 'error'; modelError?: string } {
     return { accountId: this.codexAuth?.accountId, prompt: this.codexPrompt,
-      models: this.codexAuth?.availableModels ?? [] };
+      models: this.codexAuth?.availableModels ?? [], modelState: this.codexAuth?.modelListState ?? 'idle',
+      modelError: this.codexAuth?.modelListError };
   }
 
   async startCodexLogin(): Promise<void> {
@@ -285,9 +286,9 @@ export default class PrismPlugin extends Plugin {
     this.codexPrompt = undefined;
   }
 
-  async refreshCodexModels(): Promise<void> {
+  async refreshCodexModels(force = true): Promise<void> {
     if (!this.codexAuth) throw new Error('ChatGPT connection is not ready.');
-    await this.codexAuth.listModels(true);
+    await this.codexAuth.listModels(force);
   }
 
   async testCodexConnection(): Promise<void> {
@@ -502,6 +503,7 @@ export default class PrismPlugin extends Plugin {
 }
 
 class PrismSettingTab extends PluginSettingTab {
+  private visible = false;
   private activeConnectionTest?: object;
   private connectionTestResult?: string;
 
@@ -515,10 +517,22 @@ class PrismSettingTab extends PluginSettingTab {
   }
 
   hide(): void {
+    this.visible = false;
     this.invalidateConnectionTest();
   }
 
+  private async loadCodexModels(force: boolean): Promise<void> {
+    const accountId = this.prism.getCodexStatus().accountId;
+    if (!accountId || this.prism.getCodexStatus().modelState === 'loading') return;
+    const loading = this.prism.refreshCodexModels(force);
+    this.display();
+    try { await loading; } catch { /* The catalog stores a safe error for the settings UI. */ }
+    if (this.visible && this.prism.settings.llmConnection === 'chatgpt-codex' &&
+        accountId === this.prism.getCodexStatus().accountId) this.display();
+  }
+
   display(): void {
+    this.visible = true;
     const { containerEl } = this;
     containerEl.empty();
 
@@ -645,7 +659,7 @@ class PrismSettingTab extends PluginSettingTab {
 
     if (this.prism.settings.llmConnection === 'chatgpt-codex') {
       containerEl.createEl('p', { text: 'Experimental Codex compatibility uses a ChatGPT account with Codex access. It uses an interface that can change. Device authorization contacts https://auth.openai.com. You may need to enable device-code sign-in in ChatGPT settings.' });
-      const { accountId, prompt } = this.prism.getCodexStatus();
+      const { accountId, prompt, modelState, modelError } = this.prism.getCodexStatus();
       new Setting(containerEl)
         .setName('ChatGPT account')
         .setDesc(accountId ? `Saved account: ${accountId}` : prompt ? 'Complete authorization in your browser.' : 'Not connected on this device.')
@@ -669,12 +683,15 @@ class PrismSettingTab extends PluginSettingTab {
       }
       if (accountId) {
         new Setting(containerEl).setName('Codex models')
-          .setDesc('Sends the OAuth token to chatgpt.com to load listed model names. No Vault content is sent. Use Test ChatGPT connection to verify the selected model.')
-          .addButton((button) => button.setButtonText('Refresh models').onClick(async () => {
-            try { await this.prism.refreshCodexModels(); this.display(); }
-            catch (error) { new Notice(error instanceof CodexModelListError
-              ? error.message : 'Prism could not load Codex models. Try again.'); }
-          }));
+          .setDesc(`Sends the OAuth token to chatgpt.com to load listed model names. No Vault content is sent. Use Test ChatGPT connection to verify the selected model. ${modelState === 'loading' ? 'Loading models...' : modelError ?? ''}`)
+          .addButton((button) => button.setButtonText(modelState === 'loading' ? 'Loading models...' : 'Refresh models')
+            .setDisabled(modelState === 'loading').onClick(() => this.loadCodexModels(true)));
+        if (modelState === 'idle' && !codexModels.length) {
+          void Promise.resolve().then(() => {
+            if (this.visible && this.prism.settings.llmConnection === 'chatgpt-codex' &&
+                this.prism.getCodexStatus().modelState === 'idle') return this.loadCodexModels(false);
+          });
+        }
       }
       new Setting(containerEl)
         .setName('Test ChatGPT connection')
