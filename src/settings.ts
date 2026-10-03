@@ -1,6 +1,7 @@
 import { parseExcludedPaths } from './core/index/exclusion-rules';
 
 export interface PluginSettings {
+  searchMode: 'full-text' | 'local' | 'openai';
   showVaultNotice: boolean;
   allowRemoteEmbeddingIndexing: boolean;
   embeddingModel: string;
@@ -11,6 +12,7 @@ export interface PluginSettings {
 }
 
 const DEFAULT_SETTINGS: PluginSettings = {
+  searchMode: 'full-text',
   showVaultNotice: true,
   allowRemoteEmbeddingIndexing: false,
   embeddingModel: '',
@@ -32,10 +34,13 @@ export function loadSettings(data: unknown): PluginSettings {
   }
   const excludedPaths = parseExcludedPaths((saved.excludedPaths as string[] | undefined ?? []).join('\n'));
   return {
+    searchMode: saved.searchMode === 'local' || saved.searchMode === 'full-text'
+      ? saved.searchMode : saved.allowRemoteEmbeddingIndexing === true ? 'openai' : 'full-text',
     showVaultNotice: typeof saved.showVaultNotice === 'boolean'
       ? saved.showVaultNotice
       : DEFAULT_SETTINGS.showVaultNotice,
-    allowRemoteEmbeddingIndexing: saved.allowRemoteEmbeddingIndexing === true,
+    allowRemoteEmbeddingIndexing: saved.allowRemoteEmbeddingIndexing === true &&
+      saved.searchMode !== 'local' && saved.searchMode !== 'full-text',
     embeddingModel: typeof saved.embeddingModel === 'string' ? saved.embeddingModel : DEFAULT_SETTINGS.embeddingModel,
     llmModel: typeof saved.llmModel === 'string' ? saved.llmModel : DEFAULT_SETTINGS.llmModel,
     llmConnection: saved.llmConnection === 'chatgpt-codex' ? 'chatgpt-codex' : 'api-key',
