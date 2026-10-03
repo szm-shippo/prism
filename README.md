@@ -32,6 +32,8 @@ Issue #72 の対話機能は共通の Obsidian View API・DOM・メモリ内状�
 
 設定の「LLM connection」で「ChatGPT (Codex, experimental)」を選び、「Connect」で表示されたコードを OpenAI の Device Code 認証ページに入力します。ChatGPT 側の設定で Device Code ログインの有効化が必要な場合があります。接続後は Codex モデル ID を指定します。「Test connection」は固定文 `Reply with OK.` のみを `https://chatgpt.com/backend-api/codex/responses` に送信し、現在の接続で応答できるか確認します。このテストでは Vault の内容を送信しません。ChatGPT 認証情報はデバイスごとの Obsidian Secret Storage に保存され、「Sign out」でローカルから消去されます。
 
+接続済みで設定を開くと、モデル一覧を自動取得してメモリ内に保持します。「Refresh models」で最新の一覧を取得でき、失敗時は表示された状態を確認して同じボタンで再試行できます。保存済みの選択モデルは保持され、一覧にない場合は「saved model」と表示します。一覧取得では OAuth トークンを `chatgpt.com` に送信し、Vault 本文は送信しません。
+
 この接続は Codex との実験的な互換方式です。回答時には質問、送信対象の過去の質問・回答、検索で選ばれた出典 ID・本文を `https://chatgpt.com/backend-api/codex/responses` に送信します。公開 API とは異なる経路なので、OpenAI 側の変更で動作しなくなる可能性があります。認証や回答が失敗しても、OpenAI API キーでの課金へ自動的に切り替わりません。OpenAI Embedding を選ぶ場合は別の API キーが必要です。Local Embedding と全文検索には Embedding API キーは不要です。
 
 ## ローカル Embedding
