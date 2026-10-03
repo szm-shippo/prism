@@ -18,13 +18,18 @@ export class SourceEventHandler {
     return this.enqueue(() => this.indexFile(file));
   }
 
+  configureIndexes(operation: () => Promise<void>): Promise<void> {
+    return this.enqueue(operation);
+  }
+
   removeExcluded(): Promise<void> {
     return this.enqueue(() => this.removeExcludedSources());
   }
 
-  rebuild(): Promise<void> {
+  rebuild(beforeClear?: () => Promise<void>): Promise<void> {
     return this.enqueue(async () => {
       if (!this.chunks || !this.indexes) throw new Error('Index rebuild requires chunks and indexes.');
+      await beforeClear?.();
       const files = this.vault.getMarkdownFiles();
       await this.indexes.clear();
       await this.chunks.clear();

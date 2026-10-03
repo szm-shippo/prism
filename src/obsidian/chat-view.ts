@@ -1,6 +1,7 @@
 import { ItemView, type WorkspaceLeaf } from 'obsidian';
 import type { CitedAnswer, SourceCitation } from '../core/application/citation-answerer';
 import { LLMProviderError } from '../core/provider/llm-provider';
+import { LocalEmbeddingError } from '../core/provider/local-embedding-error';
 import { selectHistory, type ConversationExchange } from '../core/application/conversation-history';
 
 interface ChatTurn {
@@ -13,6 +14,7 @@ interface ChatTurn {
 export const CHAT_VIEW_TYPE = 'prism-chat';
 
 function answerErrorMessage(error: unknown): string {
+  if (error instanceof LocalEmbeddingError) return error.message;
   if (error instanceof LLMProviderError) {
     return {
       authentication: 'Answer provider authentication failed. Reconnect it in Prism settings.',

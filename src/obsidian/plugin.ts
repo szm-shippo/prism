@@ -19,6 +19,10 @@ import { CodexLLMProvider } from './codex-llm-provider';
 import { LLMProviderError } from '../core/provider/llm-provider';
 import { CHAT_VIEW_TYPE, PrismChatView } from './chat-view';
 import { loadSettings, type PluginSettings } from '../settings';
+import { LocalEmbeddingModel } from './local-embedding-model';
+import { LocalEmbeddingProvider } from './local-embedding-provider';
+import { LOCAL_MODEL_KEY } from '../core/provider/local-embedding-model';
+import { LocalEmbeddingError } from '../core/provider/local-embedding-error';
 
 export default class PrismPlugin extends Plugin {
   settings: PluginSettings = loadSettings(null);
@@ -35,12 +39,20 @@ export default class PrismPlugin extends Plugin {
   private codexAuth?: CodexAuth;
   private codexPrompt?: DevicePrompt;
   private prismSettingTab?: PrismSettingTab;
+  private localModel?: LocalEmbeddingModel;
+  private localEmbeddings?: LocalEmbeddingProvider;
+  private embeddingGeneration = 0;
+  private lastRebuildMs?: number;
 
   async onload(): Promise<void> {
     const loaded = await this.loadData();
     this.savedData = typeof loaded === 'object' && loaded !== null && !Array.isArray(loaded)
       ? loaded as Record<string, unknown> : {};
     this.settings = loadSettings(this.savedData);
+    if (this.manifest.dir && this.app.vault.adapter) {
+      this.localModel = new LocalEmbeddingModel(this.app.vault.adapter, this.manifest.dir);
+      this.localEmbeddings = new LocalEmbeddingProvider(this.localModel);
+    }
     this.codexAuth = new CodexAuth(this.app.secretStorage);
     this.sourceRegistry = await SourceRegistry.open({
       load: async () => this.savedData.sourceRegistry,
@@ -66,7 +78,7 @@ export default class PrismPlugin extends Plugin {
     const vectorStorage = {
       load: async () => this.savedData.vectorIndex,
       save: async (state: VectorStoreState) => {
-        await this.savePluginData({ vectorIndex: state, vectorIndexModel: this.settings.embeddingModel });
+        await this.savePluginData({ vectorIndex: state, vectorIndexModel: this.embeddingKey });
       },
     };
     const getVectorStore = async (dimensions?: number): Promise<LocalVectorStore | undefined> => {
@@ -75,7 +87,7 @@ export default class PrismPlugin extends Plugin {
       if (target === undefined) return undefined;
       if (typeof target !== 'number') throw new Error('Vector index dimensions are invalid.');
       if (dimensions !== undefined && typeof this.savedData.vectorIndexModel === 'string' &&
-          this.savedData.vectorIndexModel !== this.settings.embeddingModel) {
+          this.savedData.vectorIndexModel !== this.embeddingKey) {
         throw new Error('Embedding model changed; rebuild the vector index.');
       }
       if (!this.vectorStore || this.vectorStore.dimensions !== target) {
@@ -83,9 +95,19 @@ export default class PrismPlugin extends Plugin {
       }
       return this.vectorStore;
     };
-    const remoteIndexes = new IndexUpdateOrchestrator(chunks, fullText, {
+    const semanticIndexes = new IndexUpdateOrchestrator(chunks, fullText, {
       embedBatch: async (texts) => {
-        if (!this.settings.allowRemoteEmbeddingIndexing) {
+        const generation = this.embeddingGeneration;
+        if (this.settings.searchMode === 'local') {
+          if (!this.localEmbeddings) throw new LocalEmbeddingError('Local embedding runtime is unavailable. Reinstall Prism.');
+          if (this.savedData.vectorIndexModel && this.savedData.vectorIndexModel !== this.embeddingKey) {
+            throw new Error('Search model changed. Rebuild the index.');
+          }
+          const vectors = await this.localEmbeddings.embedBatch(texts);
+          if (generation !== this.embeddingGeneration) throw new Error('Search settings changed. Rebuild the index.');
+          return vectors;
+        }
+        if (!this.remoteEmbeddingEnabled) {
           throw new Error('Remote embedding indexing is not enabled.');
         }
         const key = this.app.secretStorage.getSecret('prism-embedding-api-key');
@@ -93,12 +115,12 @@ export default class PrismPlugin extends Plugin {
           throw new Error('Configure an embedding model and API key before remote indexing.');
         }
         if (typeof this.savedData.vectorIndexModel === 'string' &&
-            this.savedData.vectorIndexModel !== this.settings.embeddingModel) {
+            this.savedData.vectorIndexModel !== this.embeddingKey) {
           throw new Error('Embedding model changed; rebuild the vector index.');
         }
         const model = this.settings.embeddingModel;
         const vectors = await new OpenAIEmbeddingProvider(key, model).embedBatch(texts);
-        if (!this.settings.allowRemoteEmbeddingIndexing || this.settings.embeddingModel !== model) {
+        if (!this.remoteEmbeddingEnabled || this.settings.embeddingModel !== model || generation !== this.embeddingGeneration) {
           throw new Error('Embedding settings changed during indexing.');
         }
         return vectors;
@@ -113,14 +135,19 @@ export default class PrismPlugin extends Plugin {
     };
     const indexUpdates = {
       sync: async (sourceId: string): Promise<void> => {
-        if (this.settings.allowRemoteEmbeddingIndexing) {
-          await remoteIndexes.sync(sourceId);
+        if ((this.settings.searchMode === 'local' || this.remoteEmbeddingEnabled) &&
+            this.savedData.vectorIndex && this.savedData.vectorIndexModel !== this.embeddingKey) {
+          await localIndexes.sync(sourceId);
+          throw new LocalEmbeddingError('Vector index uses another model. Rebuild the index in Prism settings.');
+        }
+        if (this.settings.searchMode === 'local' || this.remoteEmbeddingEnabled) {
+          await semanticIndexes.sync(sourceId);
         } else {
           await localIndexes.sync(sourceId);
           await (await getVectorStore())?.deleteBySource(sourceId);
         }
       },
-      delete: (sourceId: string): Promise<void> => remoteIndexes.delete(sourceId),
+      delete: (sourceId: string): Promise<void> => semanticIndexes.delete(sourceId),
       clear: async (): Promise<void> => {
         await fullText.clear();
         await this.savePluginData({ vectorIndex: null, vectorIndexModel: null });
@@ -171,12 +198,25 @@ export default class PrismPlugin extends Plugin {
         file instanceof TFile && file.extension === 'md';
     });
     this.ragPipeline = new RagPipeline(async (query) => {
-      if (!this.settings.allowRemoteEmbeddingIndexing ||
-          this.savedData.vectorIndexModel !== this.settings.embeddingModel) return [];
+      if (this.settings.searchMode === 'full-text') return [];
+      if (this.settings.searchMode === 'local') {
+        if (!this.localEmbeddings) throw new LocalEmbeddingError('Local embedding runtime is unavailable. Reinstall Prism.');
+        if (this.savedData.vectorIndexModel !== this.embeddingKey) {
+          throw new LocalEmbeddingError('Local vector index is missing or uses another model. Rebuild the index in Prism settings.');
+        }
+        const generation = this.embeddingGeneration;
+        const vector = await this.localEmbeddings.embed(query);
+        if (generation !== this.embeddingGeneration) throw new Error('Search settings changed. Retry the question.');
+        return vector;
+      }
+      if (!this.remoteEmbeddingEnabled || this.savedData.vectorIndexModel !== this.embeddingKey) return [];
       const store = await getVectorStore();
       const key = this.app.secretStorage.getSecret('prism-embedding-api-key');
       if (!store || !key || !this.settings.embeddingModel.trim()) return [];
-      return new OpenAIEmbeddingProvider(key, this.settings.embeddingModel).embed(query);
+      const generation = this.embeddingGeneration;
+      const vector = await new OpenAIEmbeddingProvider(key, this.settings.embeddingModel).embed(query);
+      if (generation !== this.embeddingGeneration) throw new Error('Search settings changed. Retry the question.');
+      return vector;
     }, retrieval, reranker, { get: allowedChunk }, answerer);
     this.registerEvent(this.app.vault.on('create', (file) => {
       return sourceEvents.create(file).catch(() => new Notice('Prism could not index a Markdown source. Check embedding settings and plugin storage.'));
@@ -203,6 +243,9 @@ export default class PrismPlugin extends Plugin {
   }
 
   onunload(): void {
+    this.embeddingGeneration++;
+    this.localModel?.cancel();
+    this.localEmbeddings?.dispose();
     this.codexAuth?.cancelPending();
     this.prismSettingTab?.invalidateConnectionTest();
   }
@@ -261,10 +304,11 @@ export default class PrismPlugin extends Plugin {
     this.prismSettingTab?.display();
   }
 
-  getIndexStatus(): { state: 'ready' | 'rebuilding' | 'failed'; sources: number; chunks: number } {
+  getIndexStatus(): { state: 'ready' | 'rebuilding' | 'failed'; sources: number; chunks: number; lastRebuildMs?: number } {
     const sourceIds = this.sourceRegistry?.list().map((source) => source.source_id) ?? [];
     return {
       state: this.rebuildState,
+      lastRebuildMs: this.lastRebuildMs,
       sources: sourceIds.length,
       chunks: sourceIds.reduce((count, id) => count + (this.chunkRegistry?.listBySource(id).length ?? 0), 0),
     };
@@ -295,13 +339,23 @@ export default class PrismPlugin extends Plugin {
     if (!this.sourceEvents) return Promise.reject(new Error('Prism indexes are not ready.'));
     if (this.rebuildPromise) return this.rebuildPromise;
     this.rebuildState = 'rebuilding';
-    const rebuild = this.sourceEvents.rebuild().then(() => {
+    const started = Date.now();
+    const rebuild = this.sourceEvents.rebuild(async () => {
+      if (this.settings.searchMode === 'local') {
+        if (!this.localModel || !await this.localModel.isReady()) {
+          throw new LocalEmbeddingError('Local model is missing. Download it in Prism settings before rebuilding.');
+        }
+      }
+    }).then(() => {
       this.rebuildState = 'ready';
     }, (error: unknown) => {
       this.rebuildState = 'failed';
       throw error;
     });
-    this.rebuildPromise = rebuild.finally(() => { this.rebuildPromise = undefined; });
+    this.rebuildPromise = rebuild.finally(() => {
+      this.lastRebuildMs = Date.now() - started;
+      this.rebuildPromise = undefined;
+    });
     return this.rebuildPromise;
   }
 
@@ -310,7 +364,7 @@ export default class PrismPlugin extends Plugin {
       new Notice('Prism index rebuild is already in progress.');
       return;
     }
-    if (this.settings.allowRemoteEmbeddingIndexing) {
+    if (this.remoteEmbeddingEnabled) {
       new RebuildConfirmModal(this.app, () => this.runRebuild()).open();
       return;
     }
@@ -328,8 +382,9 @@ export default class PrismPlugin extends Plugin {
       this.refreshSettingTab();
       await rebuild;
       new Notice('Prism index rebuilt from Vault Markdown.');
-    } catch {
-      new Notice('Prism could not rebuild the index. Check Vault access, embedding settings, and plugin storage, then retry.');
+    } catch (error) {
+      new Notice(error instanceof LocalEmbeddingError
+        ? error.message : 'Prism could not rebuild the index. Check Vault access, embedding settings, and plugin storage, then retry.');
     } finally {
       this.refreshSettingTab();
     }
@@ -341,18 +396,59 @@ export default class PrismPlugin extends Plugin {
   }
 
   async setEmbeddingModel(value: string): Promise<void> {
+    if (this.rebuildPromise) throw new Error('Wait for rebuild before changing the embedding model.');
     const embeddingModel = value.trim();
     if (embeddingModel !== this.settings.embeddingModel) {
-      await this.savePluginData({ embeddingModel, vectorIndex: null, vectorIndexModel: null });
-      this.vectorStore = undefined;
+      this.embeddingGeneration++;
+      const change = async () => {
+        await this.savePluginData(this.settings.searchMode === 'local' ? { embeddingModel }
+          : { embeddingModel, vectorIndex: null, vectorIndexModel: null });
+        if (this.settings.searchMode !== 'local') this.vectorStore = undefined;
+        this.settings = { ...this.settings, embeddingModel };
+      };
+      await this.sourceEvents?.configureIndexes(change);
     }
-    this.settings = { ...this.settings, embeddingModel };
   }
 
-  async setAllowRemoteEmbeddingIndexing(value: boolean): Promise<void> {
-    await this.savePluginData({ allowRemoteEmbeddingIndexing: value });
-    this.settings = { ...this.settings, allowRemoteEmbeddingIndexing: value };
+  private get embeddingKey(): string {
+    return this.settings.searchMode === 'local' ? LOCAL_MODEL_KEY : this.settings.embeddingModel;
   }
+
+  private get remoteEmbeddingEnabled(): boolean {
+    return this.settings.searchMode === 'openai' && this.settings.allowRemoteEmbeddingIndexing;
+  }
+
+  async setSearchMode(searchMode: PluginSettings['searchMode']): Promise<void> {
+    if (!['full-text', 'local', 'openai'].includes(searchMode)) throw new Error('Unknown search mode.');
+    if (this.rebuildPromise) throw new Error('Wait for the rebuild to finish before changing search mode.');
+    if (searchMode === this.settings.searchMode) return;
+    this.embeddingGeneration++;
+    this.localEmbeddings?.dispose();
+    await this.sourceEvents?.configureIndexes(async () => {
+      await this.savePluginData({ searchMode, allowRemoteEmbeddingIndexing: searchMode === 'openai',
+        vectorIndex: null, vectorIndexModel: null });
+      this.vectorStore = undefined;
+      this.settings = { ...this.settings, searchMode, allowRemoteEmbeddingIndexing: searchMode === 'openai' };
+    });
+  }
+
+  getLocalModelStatus(): string {
+    const metrics = this.localEmbeddings?.metrics;
+    return `${this.localModel?.status ?? 'Runtime unavailable. Reinstall Prism.'}${metrics?.loadMs
+      ? ` Last load: ${Math.round(metrics.loadMs)} ms; inference: ${Math.round(metrics.inferenceMs)} ms / ${metrics.texts} texts; model + WASM buffers: ${(metrics.modelBytes / 1048576).toFixed(1)} MiB (not peak memory).` : ''}`;
+  }
+
+  localModelBusy(): boolean { return this.localModel?.busy ?? false; }
+
+  async downloadLocalModel(): Promise<void> {
+    if (!this.localModel) throw new Error('Local model storage is unavailable. Reinstall Prism.');
+    const download = this.localModel.install();
+    this.refreshSettingTab();
+    try { await download; }
+    finally { this.refreshSettingTab(); }
+  }
+
+  cancelLocalModelDownload(): void { this.localModel?.cancel(); }
 
   async setExcludedPaths(value: string): Promise<void> {
     const excludedPaths = parseExcludedPaths(value);
@@ -452,18 +548,37 @@ class PrismSettingTab extends PluginSettingTab {
     });
 
     new Setting(containerEl)
-      .setName('Send changed chunks to OpenAI for search indexing')
-      .setDesc('Off by default. When enabled, Prism sends new or changed Markdown chunks, including previously unindexed chunks in a changed note, to https://api.openai.com/v1/embeddings using your configured embedding model and API key. Local full-text indexing continues when off. Enabling does not send existing notes immediately.')
-      .addToggle((toggle) => toggle
-        .setValue(this.prism.settings.allowRemoteEmbeddingIndexing)
+      .setName('Search method')
+      .setDesc('Local full-text sends no search data. Local Embedding runs on this device. Choosing OpenAI consents to sending new/changed chunks and search questions to https://api.openai.com/v1/embeddings (API charges apply). Changing method clears vectors; rebuild to include existing notes. Answers still send retrieved text to the selected LLM.')
+      .addDropdown((dropdown) => dropdown
+        .addOption('full-text', 'Local full-text')
+        .addOption('local', 'Local Embedding (multilingual, WASM)')
+        .addOption('openai', 'OpenAI Embedding (send search data)')
+        .setValue(this.prism.settings.searchMode)
         .onChange(async (value) => {
           try {
-            await this.prism.setAllowRemoteEmbeddingIndexing(value);
-          } catch {
-            toggle.setValue(this.prism.settings.allowRemoteEmbeddingIndexing);
-            new Notice('Prism could not save remote indexing consent. Try again.');
+            await this.prism.setSearchMode(value as PluginSettings['searchMode']);
+            new Notice('Search method changed. Rebuild the index for existing notes.');
+            this.display();
+          } catch (error) {
+            dropdown.setValue(this.prism.settings.searchMode);
+            new Notice(this.prism.getIndexStatus().state === 'rebuilding'
+              ? 'Wait for the rebuild to finish before changing search method.' : 'Could not save search method. Try again.');
           }
         }));
+
+    new Setting(containerEl)
+      .setName('Local Embedding model')
+      .setDesc(`Multilingual MiniLM-L12-v2, Apache-2.0, q8 / 384 dimensions. Download ~129 MiB from huggingface.co (redirects to Hugging Face CDN / Xet storage) for on-device search; no Vault text or questions are sent. Stored under the Prism plugin directory, models/. WASM runtime ships with Prism. Desktop, iOS and Android use a single-thread WASM worker; requires WASM SIMD and module workers. Loading can use hundreds of MiB to over 1 GiB; mobile may be slower or run out of memory. Real-device validation is pending. ${this.prism.getLocalModelStatus()}`)
+      .addButton((button) => button.setButtonText('Download / repair model')
+        .setDisabled(this.prism.localModelBusy())
+        .onClick(async () => {
+          try { await this.prism.downloadLocalModel(); new Notice('Local model ready. Rebuild the index.'); }
+          catch (error) { new Notice(error instanceof Error ? error.message : 'Could not download local model.'); }
+        }))
+      .addButton((button) => button.setButtonText('Cancel download')
+        .setDisabled(!this.prism.localModelBusy())
+        .onClick(() => this.prism.cancelLocalModelDownload()));
 
     new Setting(containerEl)
       .setName('Embedding model')
@@ -611,7 +726,8 @@ class PrismSettingTab extends PluginSettingTab {
     const status = this.prism.getIndexStatus();
     new Setting(containerEl)
       .setName('Index status')
-      .setDesc(`Status: ${status.state}. ${status.sources} sources, ${status.chunks} chunks.`);
+      .setDesc(`Status: ${status.state}. ${status.sources} sources, ${status.chunks} chunks.${status.lastRebuildMs !== undefined
+        ? ` Last rebuild: ${status.lastRebuildMs} ms.` : ''}`);
     let readExclusions = () => this.prism.settings.excludedPaths.join('\n');
     new Setting(containerEl)
       .setName('Excluded paths')

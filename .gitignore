@@ -1,3 +1,7 @@
 spec/
 node_modules/
 main.js
+target/
+local-embedding-worker.js
+ort-wasm-simd-threaded.jsep.mjs
+ort-wasm-simd-threaded.jsep.wasm

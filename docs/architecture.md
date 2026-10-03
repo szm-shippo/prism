@@ -7,7 +7,7 @@
 | `src/presentation/` | 表示用の状態・変換。Obsidian の画面構築は `src/obsidian/` で行う。 |
 | `src/core/application/` | ユースケースの調整。 |
 | `src/core/index/` | 検索用の派生データと、その操作。 |
-| `src/core/provider/` | 外部モデルとの通信を表す境界と実装。 |
+| `src/core/provider/` | モデルによる推論の境界、モデル定義、共通エラー。 |
 | `src/obsidian/` | Vault、イベント、設定画面などの Obsidian API との接続。 |
 
 Core は `obsidian` パッケージ、`src/obsidian/`、`src/presentation/` を import しない。`src/core/index/` と `src/core/provider/` は `src/core/application/` を import しない。`src/presentation/` も Obsidian API を import しない。これらは `npm test` の境界検査で確認する。
@@ -54,6 +54,8 @@ Vault の作成・変更・削除イベントは Chunk Registry の更新後に�
 
 初期の具体実装は `src/obsidian/openai-embedding-provider.ts` とし、Obsidian の `requestUrl` から OpenAI の `/v1/embeddings` へ、指定されたテキストとモデル ID を送る。API キーとモデルは呼び出し側から渡す。応答本文や通信例外はエラーメッセージに含めない。送信先は固定し、Vault の他の内容は読み取らない。
 
+Issue #68 の LocalEmbeddingProvider も同じ境界を実装し、モデル導入を担う Obsidian DataAdapter と推論用 Worker を接続する。推論 Worker はブラウザー用ランタイムを独立した成果物として持ち、通信を無効にする。設定変更と索引更新・再構築を同じイベントキューで順序付け、実行中に設定が変わった推論結果を破棄する。モデルとランタイムの配布、負荷と検証記録は [ローカル Embedding](local-embedding.md) を参照する。
+
 ## LLM Provider
 
 `src/core/provider/llm-provider.ts` は role 付きメッセージと出典 ID を持つ context をリクエストに分けて渡し、生成テキストを返す。逐次出力は任意の `stream` メソッドで表す。Provider 固有の失敗は `LLMProviderError` の共通コードに変換し、利用者向けメッセージには元の応答本文や認証情報を含めない。実際の通信とエラー変換は具体的な Provider 実装が担う。
@@ -68,7 +70,7 @@ Provider 設定 UI はモデル ID をプラグイン設定データへ保存し
 
 ## RAG Pipeline
 
-`RagPipeline` は query のベクトル化、Hybrid Retrieval、rerank、context 構築、回答生成、出典付与を接続する。context は上位の完全な chunk を選び、JSON 化した UTF-8 バイト数を保守的な token 上限として使う。初期値は候補 20 件、context 最大 6 chunk、上限 6000 とし、ここでの実装値であって製品仕様の固定値ではない。ベクトル検索は同意済みの現行モデルのインデックスと認証情報が揃う場合だけ行い、それ以外はローカル全文検索を使う。回答に使う chunk の source は現在の Vault で存在を確認する。
+`RagPipeline` は query のベクトル化、Hybrid Retrieval、rerank、context 構築、回答生成、出典付与を接続する。context は上位の完全な chunk を選び、JSON 化した UTF-8 バイト数を保守的な token 上限として使う。初期値は候補 20 件、context 最大 6 chunk、上限 6000 とし、ここでの実装値であって製品仕様の固定値ではない。検索方式は全文検索・Local Embedding・OpenAI Embedding から明示的に選ぶ。OpenAI のベクトル検索は同意済みの現行モデルの索引と認証情報が揃う場合だけ行う。Local Embedding は端末内 Provider でベクトル化し、モデルや索引の欠落・不整合は修復・再構築を案内するエラーとして扱う。回答に使う chunk の source は現在の Vault で存在を確認する。
 
 ## Index Controls
 

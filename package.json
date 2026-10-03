@@ -13,5 +13,11 @@
     "esbuild": "^0.25.5",
     "obsidian": "^1.13.1",
     "typescript": "^5.8.3"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "3.8.1"
+  },
+  "overrides": {
+    "sharp": "0.35.4"
   }
 }
