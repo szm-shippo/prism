@@ -28,14 +28,14 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
     return result;
   }
 
-  dispose(): void {
+  dispose(error = new LocalEmbeddingError('Local embedding stopped. Retry the operation.')): void {
     this.generation++;
     this.worker?.terminate();
     this.worker = undefined;
     this.loading = undefined;
     for (const request of this.pending.values()) {
       clearTimeout(request.timer);
-      request.reject(new LocalEmbeddingError('Local embedding stopped. Retry the operation.'));
+      request.reject(error);
     }
     this.pending.clear();
   }
@@ -60,7 +60,9 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
     try { this.worker = new Worker(url, { type: 'module' }); }
     catch { throw new LocalEmbeddingError('This WebView cannot start local WASM inference. Update Obsidian / OS or choose full-text search.'); }
     finally { URL.revokeObjectURL(url); }
-    this.worker.onmessage = (event: MessageEvent) => {
+    const worker = this.worker;
+    worker.onmessage = (event: MessageEvent) => {
+      if (this.worker !== worker) return;
       const { id, vectors, error } = event.data;
       const pending = this.pending.get(id);
       if (!pending) return;
@@ -72,8 +74,14 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
       }
       else pending.resolve(vectors);
     };
-    this.worker.onerror = () => this.dispose();
-    this.worker.onmessageerror = () => this.dispose();
+    worker.onerror = () => {
+      if (this.worker === worker) this.dispose(new LocalEmbeddingError(
+        'Local embedding worker failed to start or crashed. Update all Prism runtime files, reload Prism, and retry.'));
+    };
+    worker.onmessageerror = () => {
+      if (this.worker === worker) this.dispose(new LocalEmbeddingError(
+        'Local embedding worker could not receive data. Reload Prism and retry.'));
+    };
     this.metrics.modelBytes = Object.values(models).reduce((sum, bytes) => sum + bytes.byteLength, 0) + wasm.byteLength;
     await this.send({ type: 'init', models, factory, wasm }, [...Object.values(models), wasm]);
     this.metrics.loadMs = performance.now() - started;

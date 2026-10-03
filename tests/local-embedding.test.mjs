@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { webcrypto } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { runInNewContext } from 'node:vm';
 import { test } from 'node:test';
@@ -121,7 +122,65 @@ test('local provider shares worker startup, bounds requests, and retries after a
   assert.equal(workers[0].stopped, true);
   await provider.embed('retry');
   assert.equal(loads, 2);
+  workers[0].onerror();
+  assert.notEqual(workers[1].stopped, true);
   provider.dispose();
+});
+
+test('worker startup failure reports a safe runtime repair instruction and permits retry', async () => {
+  let fail = true;
+  const workers = [];
+  class FakeWorker {
+    constructor() { workers.push(this); }
+    postMessage(message) {
+      queueMicrotask(() => {
+        if (fail) this.onerror({ message: 'private text should never reach the UI' });
+        else this.onmessage({ data: { id: message.id,
+          vectors: message.type === 'init' ? [] : [[1, 0]] } });
+      });
+    }
+    terminate() { this.stopped = true; }
+  }
+  const module = { exports: {} };
+  runInNewContext(providerBundle, { module, exports: module.exports, Worker: FakeWorker, performance, Blob, URL, setTimeout, clearTimeout });
+  const provider = new module.exports.LocalEmbeddingProvider({
+    load: async () => ({ model: new ArrayBuffer(1) }),
+    loadRuntime: async () => ({ script: '', factory: '', wasm: new ArrayBuffer(1) }),
+  });
+  await assert.rejects(provider.embed('synthetic query'), (error) => {
+    assert.match(error.message, /Update all Prism runtime files/);
+    assert.doesNotMatch(error.message, /private text|Local embedding stopped/);
+    return true;
+  });
+  assert.equal(workers[0].stopped, true);
+  fail = false;
+  assert.deepEqual(structuredClone(await provider.embed('retry')), [1, 0]);
+  provider.dispose();
+});
+
+test('distributed worker boots when Electron exposes Node globals without selecting a native backend', async () => {
+  const source = await readFile(new URL('../target/local-embedding-worker.js', import.meta.url), 'utf8');
+  const results = [];
+  const context = {
+    process: { release: { name: 'node' }, versions: { node: '22.0.0', electron: '44.5.1' } },
+    require() { assert.fail('worker must not load Node modules'); },
+    postMessage(message) { results.push(message); }, console,
+  };
+  runInNewContext(source.replaceAll('import.meta', "({ url: 'blob:app://obsidian.md/test' })"), context, { timeout: 5000 });
+  assert.equal(typeof context.onmessage, 'function');
+  context.onmessage({ data: { type: 'embed', texts: ['synthetic query'], id: 1 } });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(results[0].id, 1);
+  assert.equal(results[0].error, true);
+});
+
+test('distributed WASM factory initializes from memory under Node without loading worker_threads', async () => {
+  const source = await readFile(new URL('../target/ort-wasm-simd-threaded.jsep.mjs', import.meta.url), 'utf8');
+  // A data URL cannot be passed to Node createRequire; the original factory fails here.
+  const { default: factory } = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
+  const binary = await readFile(new URL('../target/ort-wasm-simd-threaded.jsep.wasm', import.meta.url));
+  const runtime = await factory({ wasmBinary: binary, numThreads: 1, locateFile: () => 'local-wasm-not-fetched' });
+  assert.equal(typeof runtime._OrtInit, 'function');
 });
 
 const workerBundle = await bundle('local-embedding-worker', [{ name: 'fake-engine', setup(builder) {

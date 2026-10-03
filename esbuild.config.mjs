@@ -5,6 +5,8 @@ const production = process.argv[2] === 'production';
 const workerContext = await esbuild.context({
   entryPoints: ['src/obsidian/local-embedding-worker.ts'], bundle: true,
   platform: 'browser', format: 'esm', target: 'es2021',
+  // Obsidian Desktop exposes Node in workers; inference must use the web backend.
+  define: { process: 'undefined', 'globalThis.process': 'undefined' },
   outfile: 'local-embedding-worker.js', minify: production,
 });
 await workerContext.rebuild();
@@ -12,7 +14,15 @@ if (production) await workerContext.dispose();
 else await workerContext.watch();
 await mkdir('target', { recursive: true });
 for (const name of ['ort-wasm-simd-threaded.jsep.mjs', 'ort-wasm-simd-threaded.jsep.wasm']) {
-  await copyFile(`node_modules/onnxruntime-web/dist/${name}`, name);
+  if (name.endsWith('.mjs')) {
+    const factory = await readFile(`node_modules/onnxruntime-web/dist/${name}`, 'utf8');
+    const { code } = await esbuild.transform(factory, {
+      format: 'esm', target: 'es2022', define: { process: 'undefined', 'globalThis.process': 'undefined' },
+    });
+    await writeFile(name, code);
+  } else {
+    await copyFile(`node_modules/onnxruntime-web/dist/${name}`, name);
+  }
   await copyFile(name, `target/${name}`);
 }
 await copyFile('local-embedding-worker.js', 'target/local-embedding-worker.js');

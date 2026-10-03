@@ -40,6 +40,7 @@ Prism の「Search method」で検索方式を選びます。全文検索は初�
 - Windows / headless Edge `154.0.4258.53`: 公開モデルを読み、ブラウザーを offline にして実際の配布 Worker と WASM を実行。「子猫は長椅子で休んでいます。」で「猫がソファで眠っています。」を無関係な天気・バックアップの文より高く取得。類似度は約 0.647 / -0.021 / 0.081、384 次元、外部リクエスト 0 件。
 - この PC の 1 回の測定: モデル初期化 852 ms、3 文のベクトル化は初期化を含め 942 ms、質問 1 文の推論 12 ms。推論後の headless ブラウザー全プロセスの PrivateMemorySize64 合計は約 1.28 GiB。テストページ、ブラウザー、tokenizer、WASM などを含む値で、Prism 単体のピークメモリではありません。テスト用モデルを事前にメモリへ読み込んでから測定しており、Obsidian DataAdapter の読み込みや SHA-256 検証の時間は含みません。Vault 全体の索引時間や他端末の負荷には換算できません。
 - Obsidian Desktop・iOS・Android の実機でのモデル導入、表示・操作、ピークメモリ、初回読み込み・索引作成時間、および実際の LLM 接続は未実施です。
+- Desktop 起動の回帰検証: Obsidian の `nodeIntegrationInWorker: true` と同じ設定、`app://obsidian.md/` の独立した Electron アプリで、旧ビルドが Node backend を選んで Worker 起動時に停止することを再現。Worker と WASM factory の両方をビルド時にブラウザー用へ固定し、Electron `44.5.1` / Chromium `152.0.7977.130` で実モデルのオフライン推論と外部リクエスト 0 件を確認。初期化約 1.01 秒、質問推論約 12 ms。この検証アプリはユーザーの Obsidian プロファイルや Vault を開きません。
 
 実モデルの検証スクリプトは通常の `npm test` に含めず、合成文だけを使用します。再実行には `npm run build` 後に Playwright を一時導入します。
 
@@ -50,3 +51,12 @@ node scripts/validate-local-embedding.mjs --download-model
 ```
 
 `--download-model` は公開モデルの取得を許可する引数です。次回はこの引数なしで検証済みの `target/models/` を再利用できます。モデル・検証用ファイルは Git に含めません。ブラウザーの場所が異なる場合は `PRISM_BROWSER` を変更してください。
+
+Desktop の起動条件も確認する場合は、独立した Electron 検証アプリを使います。
+
+```powershell
+npm install --no-save --package-lock=false playwright electron
+node scripts/validate-local-embedding.mjs --electron --download-model
+```
+
+Electron の初回導入時には検証用実行ファイルをダウンロードします。検証用プロファイルは `target/local-embedding-electron-profile/` に保存し、ウィンドウは非表示で実行します。

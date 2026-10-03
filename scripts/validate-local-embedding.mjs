@@ -4,7 +4,7 @@ import { createServer } from 'node:http';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { build } from 'esbuild';
-import { chromium } from 'playwright';
+import { chromium, _electron } from 'playwright';
 
 const definitions = await build({ entryPoints: ['src/core/provider/local-embedding-model.ts'],
   bundle: true, format: 'esm', write: false });
@@ -41,20 +41,30 @@ const server = createServer(async (request, response) => {
 });
 await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
 let browser;
+let electron;
 try {
-  browser = await chromium.launch({ headless: true, executablePath: process.env.PRISM_BROWSER || undefined });
-  const context = await browser.newContext();
-  const page = await context.newPage();
+  const electronMode = process.argv.includes('--electron');
+  if (electronMode) {
+    const fixtureEnv = { ...process.env, PRISM_TEST_PORT: String(server.address().port) };
+    delete fixtureEnv.ELECTRON_RUN_AS_NODE;
+    electron = await _electron.launch({ args: ['scripts/local-embedding-electron-fixture.cjs'],
+      env: fixtureEnv });
+  } else {
+    browser = await chromium.launch({ headless: true, executablePath: process.env.PRISM_BROWSER || undefined });
+  }
+  const context = electron ? electron.context() : await browser.newContext();
+  const page = electron ? await electron.firstWindow() : await context.newPage();
   page.on('console', (event) => { if (event.type() === 'error') console.error(event.text()); });
   page.on('pageerror', (error) => console.error(error.message));
   const external = [];
   await context.route('**/*', (route) => {
-    if (!route.request().url().startsWith('http://127.0.0.1:')) {
+    if (!route.request().url().startsWith('http://127.0.0.1:') &&
+        !route.request().url().startsWith('app://obsidian.md/')) {
       external.push(route.request().url()); return route.abort();
     }
     return route.continue();
   });
-  await page.goto(`http://127.0.0.1:${server.address().port}`);
+  if (!electron) await page.goto(`http://127.0.0.1:${server.address().port}`);
   await page.evaluate(async ({ directory, names }) => {
     const { LocalEmbeddingProvider } = await import('/local-provider-test.js');
     const models = {};
@@ -80,7 +90,7 @@ try {
   });
   if (external.length) throw new Error(`Unexpected external requests: ${external.length}`);
   let privateBytes;
-  if (process.platform === 'win32') {
+  if (process.platform === 'win32' && browser) {
     const session = await browser.newBrowserCDPSession();
     const { processInfo } = await session.send('SystemInfo.getProcessInfo');
     const ids = processInfo.map((process) => Number(process.id)).filter(Number.isSafeInteger);
@@ -88,10 +98,14 @@ try {
       `(Get-Process -Id ${ids.join(',')} -ErrorAction SilentlyContinue | Measure-Object -Property PrivateMemorySize64 -Sum).Sum`],
     { encoding: 'utf8' }).trim());
   }
+  const version = electron
+    ? await electron.evaluate(() => ({ electron: process.versions.electron, chromium: process.versions.chrome }))
+    : browser.version();
   console.log(JSON.stringify({ ...result, browserPrivateBytesAfterInference: privateBytes,
-    externalRequests: external.length, browser: browser.version() }, null, 2));
+    externalRequests: external.length, browser: version }, null, 2));
   await page.evaluate(() => window.provider.dispose());
 } finally {
   await browser?.close();
+  await electron?.close();
   await new Promise((resolve) => server.close(resolve));
 }
