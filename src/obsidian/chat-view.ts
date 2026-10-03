@@ -1,6 +1,14 @@
 import { ItemView, type WorkspaceLeaf } from 'obsidian';
 import type { CitedAnswer, SourceCitation } from '../core/application/citation-answerer';
 import { LLMProviderError } from '../core/provider/llm-provider';
+import { selectHistory, type ConversationExchange } from '../core/application/conversation-history';
+
+interface ChatTurn {
+  question: string;
+  answer?: CitedAnswer;
+  error?: string;
+  omitted: number;
+}
 
 export const CHAT_VIEW_TYPE = 'prism-chat';
 
@@ -34,11 +42,16 @@ function answerErrorMessage(error: unknown): string {
 
 export class PrismChatView extends ItemView {
   private pending = false;
-  private requestId = 0;
+  private readonly turns: ChatTurn[] = [];
+  private conversation?: HTMLDivElement;
+  private query?: HTMLTextAreaElement;
+  private button?: HTMLButtonElement;
+  private reset?: HTMLButtonElement;
+  private draft = '';
 
   constructor(
     leaf: WorkspaceLeaf,
-    private readonly answer: (query: string) => Promise<CitedAnswer>,
+    private readonly answer: (query: string, history: readonly ConversationExchange[]) => Promise<CitedAnswer>,
     private readonly openCitation: (citation: SourceCitation) => Promise<boolean>,
   ) {
     super(leaf);
@@ -61,7 +74,27 @@ export class PrismChatView extends ItemView {
     });
     const heading = this.contentEl.createEl('h2', { text: 'Ask Prism' });
     heading.style.flex = 'none';
+    const reset = this.contentEl.createEl('button', { text: 'New conversation' });
+    reset.type = 'button';
+    reset.style.flex = 'none';
+    this.reset = reset;
+    reset.addEventListener('click', () => {
+      if (this.pending) return;
+      this.turns.length = 0;
+      this.draft = '';
+      query.value = '';
+      inputStatus.textContent = '';
+      this.renderConversation();
+      query.focus();
+    });
+    const disclosure = this.contentEl.createEl('details');
+    disclosure.createEl('summary', { text: 'Data sent: questions, answers and retrieved Vault text to your selected LLM connection' });
+    disclosure.createEl('p', {
+      text: 'Your question, retrieved Vault text and source IDs, and up to 6 recent question/answer pairs (12,000 UTF-8 bytes) are sent to the LLM connection selected in Prism settings: OpenAI API (api.openai.com) or ChatGPT/Codex (chatgpt.com). Previous questions also accompany vector search when remote embeddings are enabled. Conversation stays in this view and is not saved to Markdown.',
+    });
+    Object.assign(disclosure.style, { flex: 'none', maxHeight: '25%', overflowY: 'auto' });
     const conversation = this.contentEl.createDiv({ cls: 'prism-ask-conversation' });
+    this.conversation = conversation;
     Object.assign(conversation.style, {
       flex: '1 1 auto', minHeight: '0', overflowY: 'auto', overflowWrap: 'anywhere',
     });
@@ -75,29 +108,35 @@ export class PrismChatView extends ItemView {
     const query = label.createEl('textarea', {
       attr: { rows: '4', placeholder: 'Ask about your Vault Markdown' },
     });
+    this.query = query;
+    query.value = this.draft;
+    query.addEventListener('input', () => { this.draft = query.value; });
     Object.assign(query.style, {
       display: 'block', width: '100%', boxSizing: 'border-box',
       maxHeight: '30vh', resize: 'vertical',
     });
     const submit = form.createEl('button', { text: 'Ask' });
+    this.button = submit;
     submit.type = 'submit';
     const inputStatus = form.createEl('p', { attr: { role: 'status', 'aria-live': 'polite' } });
     form.addEventListener('submit', (event) => {
       event.preventDefault();
-      return this.submit(query, submit, inputStatus, conversation);
+      return this.submit(query, inputStatus);
     });
+    this.renderConversation();
   }
 
   async onClose(): Promise<void> {
-    this.requestId += 1;
-    this.pending = false;
+    this.draft = this.query?.value ?? this.draft;
+    this.conversation = undefined;
+    this.query = undefined;
+    this.button = undefined;
+    this.reset = undefined;
   }
 
   private async submit(
     query: HTMLTextAreaElement,
-    button: HTMLButtonElement,
     inputStatus: HTMLElement,
-    conversation: HTMLDivElement,
   ): Promise<void> {
     if (this.pending) return;
     const question = query.value.trim();
@@ -106,26 +145,68 @@ export class PrismChatView extends ItemView {
       query.focus();
       return;
     }
-    const request = ++this.requestId;
-    this.pending = true;
-    button.disabled = true;
     inputStatus.textContent = '';
-    conversation.empty();
-    const turn = conversation.createDiv({ cls: 'prism-ask-turn' });
-    turn.createEl('p', { cls: 'prism-ask-question', text: question });
-    const response = turn.createDiv({ cls: 'prism-ask-answer' });
-    response.style.whiteSpace = 'pre-wrap';
-    const sources = turn.createDiv();
-    const status = turn.createEl('p', { attr: { role: 'status', 'aria-live': 'polite' } });
-    status.textContent = 'Answering…';
+    this.draft = query.value;
+    const turn: ChatTurn = { question, omitted: 0 };
+    this.turns.push(turn);
+    await this.requestAnswer(turn);
+  }
+
+  private async requestAnswer(turn: ChatTurn): Promise<void> {
+    if (this.pending) return;
+    const history = selectHistory(this.turns.slice(0, this.turns.indexOf(turn)).flatMap((previous) =>
+      previous.answer ? [{ question: previous.question, answer: previous.answer.content }] : []));
+    turn.omitted = history.omitted;
+    turn.error = undefined;
+    this.pending = true;
+    this.renderConversation();
     try {
-      const answer = await this.answer(question);
-      if (request !== this.requestId) return;
-      this.renderAnswer(response, status, answer);
-      if (answer.citations.length > 0) {
+      turn.answer = await this.answer(turn.question, history.exchanges);
+      if ((this.query?.value ?? this.draft).trim() === turn.question) {
+        this.draft = '';
+        if (this.query) this.query.value = '';
+      }
+    } catch (error) {
+      turn.error = answerErrorMessage(error);
+    } finally {
+      this.pending = false;
+      this.renderConversation();
+    }
+  }
+
+  private renderConversation(): void {
+    const conversation = this.conversation;
+    if (!conversation) return;
+    if (this.button) this.button.disabled = this.pending;
+    if (this.query) this.query.disabled = this.pending;
+    if (this.reset) this.reset.disabled = this.pending;
+    conversation.empty();
+    for (const [index, entry] of this.turns.entries()) {
+      const turn = conversation.createDiv({ cls: 'prism-ask-turn' });
+      turn.createEl('p', { cls: 'prism-ask-question', text: entry.question });
+      const response = turn.createDiv({ cls: 'prism-ask-answer' });
+      response.style.whiteSpace = 'pre-wrap';
+      const sources = turn.createDiv();
+      const status = turn.createEl('p', { attr: { role: 'status', 'aria-live': 'polite' } });
+      if (entry.omitted > 0) turn.createEl('p', {
+        text: `${entry.omitted} earlier question/answer pairs omitted from this request's context.`,
+      });
+      if (entry.answer) {
+        this.renderAnswer(response, status, entry.answer);
+        status.textContent = 'Answer ready.';
+      } else {
+        status.textContent = entry.error ?? 'Answering…';
+        if (entry.error && index === this.turns.length - 1) {
+          const retry = turn.createEl('button', { text: 'Retry' });
+          retry.type = 'button';
+          retry.disabled = this.pending;
+          retry.addEventListener('click', () => this.requestAnswer(entry));
+        }
+      }
+      if (entry.answer && entry.answer.citations.length > 0) {
         sources.createEl('h3', { text: 'Sources' });
         const list = sources.createEl('ol');
-        for (const citation of answer.citations) {
+        for (const citation of entry.answer.citations) {
           const item = list.createEl('li');
           const link = item.createEl('button', {
             text: `${citation.path} (lines ${citation.startLine}–${citation.endLine})`,
@@ -134,19 +215,8 @@ export class PrismChatView extends ItemView {
           link.addEventListener('click', () => this.openSource(citation, status));
         }
       }
-      status.textContent = 'Answer ready.';
-      conversation.scrollTop = conversation.scrollHeight;
-    } catch (error) {
-      if (request === this.requestId) {
-        status.textContent = answerErrorMessage(error);
-        conversation.scrollTop = conversation.scrollHeight;
-      }
-    } finally {
-      if (request === this.requestId) {
-        this.pending = false;
-        button.disabled = false;
-      }
     }
+    conversation.scrollTop = conversation.scrollHeight;
   }
 
   private renderAnswer(response: HTMLDivElement, status: HTMLElement, answer: CitedAnswer): void {

@@ -305,7 +305,9 @@ test('Ask keeps the input after a scrollable conversation and orders each turn a
   const { plugin, commands, leaves } = await loadPlugin(null);
   await commands.find((command) => command.id === 'open-chat').callback();
   const view = leaves[0].view;
-  const [heading, conversation, form] = view.contentEl.children;
+  const heading = view.contentEl.children[0];
+  const conversation = findElement(view.contentEl, (element) => element.classes.includes('prism-ask-conversation'));
+  const form = findElement(view.contentEl, (element) => element.tag === 'form');
   assert.equal(heading.tag, 'h2');
   assert.ok(view.contentEl.classes.includes('prism-ask-view'));
   assert.ok(conversation.classes.includes('prism-ask-conversation'));
@@ -334,6 +336,104 @@ test('Ask keeps the input after a scrollable conversation and orders each turn a
   const input = findElement(form, (element) => element.tag === 'textarea');
   assert.equal(input.style.width, '100%');
   assert.equal(input.style.boxSizing, 'border-box');
+});
+
+test('Ask retains ordered turns with their own sources, bounds history and resets context without saving the conversation', async () => {
+  const { plugin, commands, leaves, writes } = await loadPlugin(null);
+  await commands.find((command) => command.id === 'open-chat').callback();
+  const view = leaves[0].view;
+  const calls = [];
+  const opened = [];
+  plugin.answerQuery = async (question, history) => {
+    calls.push({ question, history: structuredClone(history) });
+    return { content: `answer ${calls.length} [^1]`, citations: [{
+      chunkId: `chunk-${calls.length}`, sourceId: `source-${calls.length}`,
+      path: `note-${calls.length}.md`, startLine: 1, endLine: 2,
+    }] };
+  };
+  plugin.openCitation = async (citation) => { opened.push(citation.path); return true; };
+  const get = (predicate) => findElement(view.contentEl, predicate);
+  const conversation = get((element) => element.classes.includes('prism-ask-conversation'));
+  const form = get((element) => element.tag === 'form');
+  const input = get((element) => element.tag === 'textarea');
+  const before = writes.length;
+  for (let i = 1; i <= 8; i++) {
+    input.value = `question ${i}`;
+    await form.submit();
+  }
+  assert.equal(conversation.children.length, 8);
+  assert.deepEqual(calls[1].history, [{ question: 'question 1', answer: 'answer 1 [^1]' }]);
+  assert.equal(calls[7].history.length, 6);
+  assert.equal(calls[7].history[0].question, 'question 2');
+  assert.match(visibleText(conversation.children[7]), /1 earlier question\/answer pairs omitted/);
+  assert.equal(writes.length, before);
+  for (const index of [0, 7]) {
+    const response = conversation.children[index].children[1];
+    await findElement(response, (element) => element.tag === 'button').click();
+  }
+  assert.deepEqual(opened, ['note-1.md', 'note-8.md']);
+  assert.match(visibleText(view.contentEl), /question\/answer pairs.*12,000 UTF-8 bytes/);
+  assert.match(visibleText(view.contentEl), /api\.openai\.com.*chatgpt\.com/);
+  await view.onClose();
+  await view.onOpen();
+  assert.equal(get((element) => element.classes.includes('prism-ask-conversation')).children.length, 8);
+  await get((element) => element.textContent === 'New conversation').click();
+  get((element) => element.tag === 'textarea').value = 'New topic';
+  await get((element) => element.tag === 'form').submit();
+  assert.deepEqual(calls.at(-1).history, []);
+  assert.equal(get((element) => element.classes.includes('prism-ask-conversation')).children.length, 1);
+});
+
+test('Ask preserves completed turns on failure and retries the last turn with the same successful history', async () => {
+  const { plugin, commands, leaves } = await loadPlugin(null);
+  await commands.find((command) => command.id === 'open-chat').callback();
+  const view = leaves[0].view;
+  const form = findElement(view.contentEl, (element) => element.tag === 'form');
+  const input = findElement(view.contentEl, (element) => element.tag === 'textarea');
+  const conversation = findElement(view.contentEl, (element) => element.classes.includes('prism-ask-conversation'));
+  const calls = [];
+  plugin.answerQuery = async (question, history) => {
+    calls.push({ question, history: structuredClone(history) });
+    if (calls.length === 2) throw new Error('private data');
+    return { content: 'Supported answer', citations: [] };
+  };
+  input.value = 'First';
+  await form.submit();
+  input.value = 'More';
+  await form.submit();
+  assert.equal(conversation.children.length, 2);
+  assert.match(visibleText(conversation.children[0]), /Supported answer/);
+  assert.doesNotMatch(visibleText(conversation), /private data/);
+  assert.equal(input.value, 'More');
+  await findElement(conversation, (element) => element.textContent === 'Retry').click();
+  assert.equal(conversation.children.length, 2);
+  assert.deepEqual(calls[2], calls[1]);
+  assert.match(visibleText(conversation.children[1]), /Supported answer/);
+  assert.equal(input.value, '');
+});
+
+test('Ask reopens during an in-flight answer without duplicating requests or losing the final result', async () => {
+  const { plugin, commands, leaves } = await loadPlugin(null);
+  await commands.find((command) => command.id === 'open-chat').callback();
+  const view = leaves[0].view;
+  let finish;
+  let calls = 0;
+  plugin.answerQuery = () => { calls++; return new Promise((resolve) => { finish = resolve; }); };
+  findElement(view.contentEl, (element) => element.tag === 'textarea').value = 'Question';
+  const pending = findElement(view.contentEl, (element) => element.tag === 'form').submit();
+  await view.onClose();
+  await view.onOpen();
+  const form = findElement(view.contentEl, (element) => element.tag === 'form');
+  assert.equal(findElement(form, (element) => element.type === 'submit').disabled, true);
+  assert.equal(findElement(view.contentEl, (element) => element.textContent === 'New conversation').disabled, true);
+  await form.submit();
+  await findElement(view.contentEl, (element) => element.textContent === 'New conversation').click();
+  assert.equal(calls, 1);
+  finish({ content: 'Final answer', citations: [] });
+  await pending;
+  assert.match(visibleText(view.contentEl), /Final answer/);
+  assert.equal(findElement(form, (element) => element.type === 'submit').disabled, false);
+  assert.equal(findElement(view.contentEl, (element) => element.tag === 'textarea').value, '');
 });
 
 test('ChatGPT selection never charges the configured API key after missing OAuth credentials', async () => {
@@ -499,10 +599,10 @@ test('Ask view validates input, shows loading and safe errors, then renders answ
   const view = leaves[0].view;
   const form = findElement(view.contentEl, (element) => element.tag === 'form');
   const input = findElement(view.contentEl, (element) => element.tag === 'textarea');
-  const button = findElement(view.contentEl, (element) => element.tag === 'button');
+  const button = findElement(form, (element) => element.type === 'submit');
   const inputStatus = findElement(form, (element) => element.attributes?.role === 'status');
   const conversation = findElement(view.contentEl, (element) => element.classes.includes('prism-ask-conversation'));
-  const turnStatus = () => findElement(conversation, (element) => element.attributes?.role === 'status');
+  const turnStatus = () => findElement(conversation.children.at(-1), (element) => element.attributes?.role === 'status');
   let calls = 0;
   plugin.answerQuery = () => { calls += 1; return Promise.reject(new Error('private note contents')); };
   await form.submit();
@@ -529,7 +629,7 @@ test('Ask view validates input, shows loading and safe errors, then renders answ
     sourceId: 'one', chunkId: 'one', path: '<b>source.md', startLine: 2, endLine: 3,
   }] });
   await form.submit();
-  assert.equal(visibleText(findElement(conversation, (element) => element.classes.includes('prism-ask-answer'))),
+  assert.equal(visibleText(findElement(conversation.children.at(-1), (element) => element.classes.includes('prism-ask-answer'))),
     '<img src=x onerror=alert(1)>');
   assert.equal(findElement(view.contentEl, (element) => element.tag === 'img'), undefined);
   assert.match(visibleText(findElement(view.contentEl, (element) => element.tag === 'li')), /<b>source\.md/);
@@ -593,6 +693,46 @@ test('query flows from local retrieval to a cited answer without remote embeddin
   assert.equal(requests.length, 1);
 });
 
+test('an Ask follow-up sends history but refreshes Vault evidence and stops answering after its source is deleted', async () => {
+  const { plugin, listeners, MockTFile, requests, commands, leaves } = await loadPlugin(null);
+  await plugin.setLlmModel('answer-model');
+  plugin.setLlmApiKey('test-key');
+  const file = new MockTFile('facts.md', '# Prism\nOriginal fact');
+  plugin.app.vault.files = [file];
+  await listeners.get('create')(file);
+  await commands.find((command) => command.id === 'open-chat').callback();
+  const view = leaves[0].view;
+  const form = findElement(view.contentEl, (element) => element.tag === 'form');
+  const input = findElement(view.contentEl, (element) => element.tag === 'textarea');
+  input.value = 'Prism';
+  await form.submit();
+  file.content = '# Prism\nUpdated fact';
+  file.stat.mtime++;
+  file.stat.size = file.content.length;
+  await listeners.get('modify')(file);
+  input.value = 'Tell me more';
+  await form.submit();
+  const messages = JSON.parse(requests[1].body).input;
+  const reference = messages.find((message) => message.content.startsWith('Reference material:\n'));
+  assert.match(reference.content, /Updated fact/);
+  assert.doesNotMatch(reference.content, /Original fact/);
+  assert.ok(messages.some((message) => message.role === 'user' && message.content === 'Prism'));
+  assert.ok(messages.some((message) => message.role === 'assistant' && message.content === 'Grounded answer [^1]'));
+  assert.equal(messages.at(-1).content, 'Tell me more');
+  const conversation = findElement(view.contentEl, (element) => element.classes.includes('prism-ask-conversation'));
+  assert.equal(conversation.children.length, 2);
+  assert.match(visibleText(conversation.children[1].children[2]), /facts\.md/);
+  const beforeDelete = requests.length;
+  plugin.app.vault.files = [];
+  await listeners.get('delete')(file);
+  input.value = 'And then?';
+  await form.submit();
+  assert.equal(requests.length, beforeDelete);
+  assert.match(visibleText(conversation.children[2]), /No relevant Vault context/);
+  assert.equal(findElement(conversation.children[2], (element) => element.tag === 'li'), undefined);
+  assert.equal(file.content, '# Prism\nUpdated fact');
+});
+
 test('a Japanese Ask question retrieves its dated Vault note without remote embedding', async () => {
   const { plugin, listeners, MockTFile, requests } = await loadPlugin(null);
   await plugin.setLlmModel('answer-model');
@@ -627,7 +767,7 @@ test('query uses a consented vector index and discloses the query embedding requ
   assert.deepEqual(JSON.parse(requests[1].body).input, ['Searchable']);
   tabs[0].display();
   assert.match(tabs[0].containerEl.children.find((child) => child.text?.startsWith('Remote processing')).text,
-    /query for vector search/);
+    /query plus retained previous questions for vector search/);
 });
 
 test('Advanced exclusion rules remove indexed data and block create, rebuild, and retrieval', async () => {
@@ -1055,7 +1195,7 @@ test('provider models persist and remote data transmission is disclosed', async 
   const children = first.tabs[0].containerEl.children;
   const disclosure = children.find((child) => typeof child.text === 'string' && child.text.includes('Remote processing'));
   assert.match(disclosure.text, /OpenAI receives Markdown or chunk text/);
-  assert.match(disclosure.text, /query plus retrieved source IDs, chunk IDs, and text/);
+  assert.match(disclosure.text, /query, up to 6 recent question\/answer pairs.*plus retrieved source IDs, chunk IDs, and text/);
   await children.find((child) => child.name === 'Embedding model').text.change('embedding-model');
   await children.find((child) => child.name === 'LLM model').text.change('text-model');
   const restarted = await loadPlugin(first.writes.at(-1));
