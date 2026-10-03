@@ -326,9 +326,14 @@ test('Ask keeps the input after a scrollable conversation and orders each turn a
   assert.match(visibleText(turn.children[2]), /fact\.md/);
   assert.equal(view.contentEl.children.at(-1), form);
 
-  const styles = await readFile(new URL('../styles.css', import.meta.url), 'utf8');
-  assert.match(styles, /\.prism-ask-view\s*\{[^}]*display:\s*flex;[^}]*flex-direction:\s*column;/s);
-  assert.match(styles, /\.prism-ask-conversation\s*\{[^}]*min-height:\s*0;[^}]*overflow-y:\s*auto;/s);
+  assert.equal(view.contentEl.style.display, 'flex');
+  assert.equal(view.contentEl.style.flexDirection, 'column');
+  assert.equal(conversation.style.minHeight, '0');
+  assert.equal(conversation.style.overflowY, 'auto');
+  assert.equal(form.style.flex, 'none');
+  const input = findElement(form, (element) => element.tag === 'textarea');
+  assert.equal(input.style.width, '100%');
+  assert.equal(input.style.boxSizing, 'border-box');
 });
 
 test('ChatGPT selection never charges the configured API key after missing OAuth credentials', async () => {

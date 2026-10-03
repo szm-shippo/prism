@@ -55,15 +55,29 @@ export class PrismChatView extends ItemView {
   async onOpen(): Promise<void> {
     this.contentEl.empty();
     this.contentEl.addClass('prism-ask-view');
-    this.contentEl.createEl('h2', { text: 'Ask Prism' });
+    Object.assign(this.contentEl.style, {
+      display: 'flex', flexDirection: 'column', boxSizing: 'border-box',
+      height: '100%', minHeight: '0', overflow: 'hidden',
+    });
+    const heading = this.contentEl.createEl('h2', { text: 'Ask Prism' });
+    heading.style.flex = 'none';
     const conversation = this.contentEl.createDiv({ cls: 'prism-ask-conversation' });
+    Object.assign(conversation.style, {
+      flex: '1 1 auto', minHeight: '0', overflowY: 'auto', overflowWrap: 'anywhere',
+    });
     conversation.setAttribute('role', 'log');
     conversation.setAttribute('aria-label', 'Prism Ask conversation');
     const form = this.contentEl.createEl('form');
     form.addClass('prism-ask-form');
+    Object.assign(form.style, { flex: 'none', maxHeight: '50%', overflowY: 'auto' });
     const label = form.createEl('label', { text: 'Question' });
+    Object.assign(label.style, { display: 'block', width: '100%', boxSizing: 'border-box' });
     const query = label.createEl('textarea', {
       attr: { rows: '4', placeholder: 'Ask about your Vault Markdown' },
+    });
+    Object.assign(query.style, {
+      display: 'block', width: '100%', boxSizing: 'border-box',
+      maxHeight: '30vh', resize: 'vertical',
     });
     const submit = form.createEl('button', { text: 'Ask' });
     submit.type = 'submit';
@@ -100,6 +114,7 @@ export class PrismChatView extends ItemView {
     const turn = conversation.createDiv({ cls: 'prism-ask-turn' });
     turn.createEl('p', { cls: 'prism-ask-question', text: question });
     const response = turn.createDiv({ cls: 'prism-ask-answer' });
+    response.style.whiteSpace = 'pre-wrap';
     const sources = turn.createDiv();
     const status = turn.createEl('p', { attr: { role: 'status', 'aria-live': 'polite' } });
     status.textContent = 'Answering…';
