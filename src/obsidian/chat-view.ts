@@ -92,7 +92,7 @@ export class PrismChatView extends ItemView {
     const disclosure = this.contentEl.createEl('details');
     disclosure.createEl('summary', { text: 'Data sent: questions, answers and retrieved Vault text to your selected LLM connection' });
     disclosure.createEl('p', {
-      text: 'Your question, retrieved Vault text and source IDs, and up to 6 recent question/answer pairs (12,000 UTF-8 bytes) are sent to the LLM connection selected in Prism settings: OpenAI API (api.openai.com) or ChatGPT/Codex (chatgpt.com). Previous questions also accompany vector search when remote embeddings are enabled. Conversation stays in this view and is not saved to Markdown.',
+      text: 'Your question, retrieved Vault text and source IDs, and up to 6 recent question/answer pairs (12,000 UTF-8 bytes) are sent to the LLM connection selected in Prism settings: OpenAI API (api.openai.com) or ChatGPT/Codex (chatgpt.com). Search runs on this device. Conversation stays in this view and is not saved to Markdown.',
     });
     Object.assign(disclosure.style, { flex: 'none', maxHeight: '25%', overflowY: 'auto' });
     const conversation = this.contentEl.createDiv({ cls: 'prism-ask-conversation' });
