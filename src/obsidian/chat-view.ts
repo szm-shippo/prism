@@ -229,7 +229,10 @@ export class PrismChatView extends ItemView {
   }
 
   private createMessage(turn: HTMLDivElement, speaker: 'You' | 'Prism'): HTMLDivElement {
-    const message = turn.createDiv({ cls: speaker === 'You' ? 'prism-ask-user-message' : 'prism-ask-assistant-message' });
+    const message = turn.createDiv({
+      cls: speaker === 'You' ? 'prism-ask-user-message' : 'prism-ask-assistant-message',
+      attr: { role: 'group', 'aria-label': speaker },
+    });
     Object.assign(message.style, {
       alignSelf: speaker === 'You' ? 'flex-end' : 'flex-start',
       boxSizing: 'border-box', minWidth: '0', maxWidth: '90%',
@@ -238,8 +241,6 @@ export class PrismChatView extends ItemView {
       backgroundColor: speaker === 'You' ? 'var(--background-secondary)' : 'var(--background-primary)',
       color: 'var(--text-normal)', overflowWrap: 'anywhere',
     });
-    const label = message.createEl('div', { cls: 'prism-ask-speaker', text: speaker });
-    Object.assign(label.style, { fontWeight: '600', marginBottom: '4px' });
     return message;
   }
 
