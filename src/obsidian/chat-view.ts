@@ -18,7 +18,10 @@ function answerErrorMessage(error: unknown): string {
   if (error instanceof LLMProviderError) {
     return {
       authentication: 'Answer provider authentication failed. Reconnect it in Prism settings.',
-      rate_limit: 'Answer provider rate limit or quota reached. Try again later.',
+      rate_limit: 'Answer provider rate limit reached. Try again later.',
+      quota: 'Answer provider usage quota reached. Check your account usage.',
+      usage_limit: 'Answer provider rate limit or quota reached. Check your account usage or try again later.',
+      context_limit: 'Input or context is too long. Shorten your question or start a new conversation.',
       unavailable: 'Answer provider or network is unavailable. Try again later.',
       invalid_request: 'Answer provider rejected the request. Check the selected model in Prism settings.',
       unknown: 'Answer provider returned an incomplete or invalid response.',
@@ -49,6 +52,7 @@ export class PrismChatView extends ItemView {
   private query?: HTMLTextAreaElement;
   private button?: HTMLButtonElement;
   private reset?: HTMLButtonElement;
+  private currentStatus?: HTMLElement;
   private draft = '';
 
   constructor(
@@ -102,6 +106,13 @@ export class PrismChatView extends ItemView {
     });
     conversation.setAttribute('role', 'log');
     conversation.setAttribute('aria-label', 'Prism Ask conversation');
+    this.currentStatus = this.contentEl.createEl('p', {
+      cls: 'prism-ask-current-status',
+      attr: { role: 'status', 'aria-live': 'polite', 'aria-atomic': 'true' },
+    });
+    Object.assign(this.currentStatus.style, {
+      flex: '0 0 auto', maxHeight: '20%', overflowY: 'auto', overflowWrap: 'anywhere', margin: '8px 0',
+    });
     const form = this.contentEl.createEl('form');
     form.addClass('prism-ask-form');
     Object.assign(form.style, { flex: 'none', maxHeight: '50%', overflowY: 'auto' });
@@ -134,6 +145,7 @@ export class PrismChatView extends ItemView {
     this.query = undefined;
     this.button = undefined;
     this.reset = undefined;
+    this.currentStatus = undefined;
   }
 
   private async submit(
@@ -157,13 +169,20 @@ export class PrismChatView extends ItemView {
   private async requestAnswer(turn: ChatTurn): Promise<void> {
     if (this.pending) return;
     const history = selectHistory(this.turns.slice(0, this.turns.indexOf(turn)).flatMap((previous) =>
-      previous.answer ? [{ question: previous.question, answer: previous.answer.content }] : []));
+      previous.answer && !previous.answer.incompleteReason && !previous.error
+        ? [{ question: previous.question, answer: previous.answer.content }] : []));
     turn.omitted = history.omitted;
     turn.error = undefined;
     this.pending = true;
     this.renderConversation();
     try {
       turn.answer = await this.answer(turn.question, history.exchanges);
+      if (turn.answer.incompleteReason) {
+        turn.error = turn.answer.incompleteReason === 'output_limit'
+          ? 'Answer incomplete: output token limit reached. Ask for a shorter answer.'
+          : 'Answer incomplete: the provider stopped before completion. Retry or check provider settings.';
+        return;
+      }
       if ((this.query?.value ?? this.draft).trim() === turn.question) {
         this.draft = '';
         if (this.query) this.query.value = '';
@@ -182,6 +201,14 @@ export class PrismChatView extends ItemView {
     if (this.button) this.button.disabled = this.pending;
     if (this.query) this.query.disabled = this.pending;
     if (this.reset) this.reset.disabled = this.pending;
+    const latest = this.turns.at(-1);
+    if (this.currentStatus) {
+      const state = this.pending ? 'pending' : latest?.error ? 'failed' : latest?.answer ? 'complete' : 'idle';
+      this.currentStatus.setAttribute('data-state', state);
+      this.currentStatus.textContent = state === 'pending' ? 'Answering… Waiting for an answer.'
+        : state === 'failed' ? `Could not complete the answer. ${latest?.error}`
+        : state === 'complete' ? 'Answer ready. Output complete.' : 'Ready for a question.';
+    }
     conversation.empty();
     for (const [index, entry] of this.turns.entries()) {
       const turn = conversation.createDiv({ cls: 'prism-ask-turn' });
@@ -196,20 +223,23 @@ export class PrismChatView extends ItemView {
       response.style.whiteSpace = 'pre-wrap';
       const sources = turn.createDiv();
       const status = turn.createEl('p', { attr: { role: 'status', 'aria-live': 'polite' } });
+      const sourceStatus = turn.createEl('p', {
+        cls: 'prism-ask-source-status', attr: { role: 'status', 'aria-live': 'polite' },
+      });
+      sourceStatus.style.margin = '0';
       if (entry.omitted > 0) turn.createEl('p', {
         text: `${entry.omitted} earlier question/answer pairs omitted from this request's context.`,
       });
       if (entry.answer) {
-        this.renderAnswer(response, status, entry.answer);
-        status.textContent = 'Answer ready.';
-      } else {
-        status.textContent = entry.error ?? 'Answering…';
-        if (entry.error && index === this.turns.length - 1) {
-          const retry = turn.createEl('button', { text: 'Retry' });
-          retry.type = 'button';
-          retry.disabled = this.pending;
-          retry.addEventListener('click', () => this.requestAnswer(entry));
-        }
+        this.renderAnswer(response, sourceStatus, entry.answer);
+      }
+      status.textContent = this.pending && index === this.turns.length - 1 ? 'Answering…'
+        : entry.error ?? (entry.answer ? 'Answer ready.' : 'Answering…');
+      if (entry.error && index === this.turns.length - 1) {
+        const retry = turn.createEl('button', { text: 'Retry' });
+        retry.type = 'button';
+        retry.disabled = this.pending;
+        retry.addEventListener('click', () => this.requestAnswer(entry));
       }
       if (entry.answer && entry.answer.citations.length > 0) {
         sources.createEl('h3', { text: 'Sources' });
@@ -221,7 +251,7 @@ export class PrismChatView extends ItemView {
           });
           link.type = 'button';
           Object.assign(link.style, { maxWidth: '100%', whiteSpace: 'normal', overflowWrap: 'anywhere', textAlign: 'left' });
-          link.addEventListener('click', () => this.openSource(citation, status));
+          link.addEventListener('click', () => this.openSource(citation, sourceStatus));
         }
       }
     }

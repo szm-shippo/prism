@@ -283,10 +283,11 @@ export default class PrismPlugin extends Plugin {
     if (this.settings.llmConnection !== 'chatgpt-codex' || !this.codexAuth?.connected) {
       throw new LLMProviderError('authentication');
     }
-    await new CodexLLMProvider(this.codexAuth, this.settings.codexModel).generate({
+    const response = await new CodexLLMProvider(this.codexAuth, this.settings.codexModel).generate({
       messages: [{ role: 'user', content: 'Reply with OK.' }],
       context: [],
     });
+    if (response.incompleteReason) throw new LLMProviderError('unknown');
   }
 
   private refreshSettingTab(): void {
@@ -674,6 +675,9 @@ class PrismSettingTab extends PluginSettingTab {
               const reason = error instanceof LLMProviderError
                 ? ({ authentication: 'Authentication failed. Reconnect your ChatGPT account.',
                     rate_limit: 'The account is rate limited or has reached its quota.',
+                    usage_limit: 'The account is rate limited or has reached its quota.',
+                    quota: 'The account has reached its usage quota. Check account usage.',
+                    context_limit: 'The request exceeds the model context limit.',
                     unavailable: 'The Codex service or network is unavailable. Try again.',
                     invalid_request: 'The selected model or account is not permitted to make this request.',
                     unknown: 'The Codex response was incomplete or invalid.' }[error.code])

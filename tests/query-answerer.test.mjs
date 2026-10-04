@@ -16,7 +16,7 @@ test('answerer sends the query and retrieved Vault context with a grounding rule
     return { content: 'A supported answer' };
   } });
   const context = [{ sourceId: 'source-one', content: 'Vault detail' }];
-  assert.equal(await answerer.answer('What is Prism?', context), 'A supported answer');
+  assert.deepEqual(await answerer.answer('What is Prism?', context), { content: 'A supported answer' });
   assert.deepEqual(request.context, context);
   assert.deepEqual(request.messages.at(-1), { role: 'user', content: 'What is Prism?' });
   assert.match(request.messages[0].content, /only the supplied Vault reference material/);
@@ -42,7 +42,7 @@ test('answerer selects distinct formats for comparison, troubleshooting, procedu
 
 test('missing context does not ask the provider to invent an answer; invalid input is rejected', async () => {
   const answerer = new QueryAnswerer({ generate: async () => { throw new Error('unexpected call'); } });
-  assert.match(await answerer.answer('question', []), /No relevant Vault context/);
+  assert.match((await answerer.answer('question', [])).content, /No relevant Vault context/);
   await assert.rejects(answerer.answer(' ', []), /non-empty query/);
   await assert.rejects(answerer.answer('question', [{ sourceId: '', content: 'note' }]), /context/);
 });
@@ -53,6 +53,13 @@ test('empty provider answers and provider failures are surfaced', async () => {
   await assert.rejects(empty.answer('question', context), /empty response/);
   const failed = new QueryAnswerer({ generate: async () => { throw new Error('provider unavailable'); } });
   await assert.rejects(failed.answer('question', context), /provider unavailable/);
+});
+
+test('output limit without visible text is propagated as an incomplete response', async () => {
+  const answerer = new QueryAnswerer({ generate: async () => ({ content: '', incompleteReason: 'output_limit' }) });
+  assert.deepEqual(await answerer.answer('question', [{ sourceId: 'source', content: 'Evidence' }]), {
+    content: '', incompleteReason: 'output_limit',
+  });
 });
 
 test('follow-up sends bounded role-ordered history as context, with only fresh Vault material as evidence', async () => {

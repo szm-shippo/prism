@@ -18,6 +18,7 @@ export interface LLMRequest {
 
 export interface LLMResponse {
   content: string;
+  incompleteReason?: 'output_limit' | 'unknown';
 }
 
 export interface LLMProvider {
@@ -26,11 +27,14 @@ export interface LLMProvider {
   stream?(request: LLMRequest): AsyncIterable<string>;
 }
 
-export type LLMProviderErrorCode = 'authentication' | 'rate_limit' | 'unavailable' | 'invalid_request' | 'unknown';
+export type LLMProviderErrorCode = 'authentication' | 'rate_limit' | 'quota' | 'usage_limit' | 'context_limit' | 'unavailable' | 'invalid_request' | 'unknown';
 
 const errorMessages: Record<LLMProviderErrorCode, string> = {
   authentication: 'LLM provider authentication failed.',
   rate_limit: 'LLM provider rate limit reached.',
+  quota: 'LLM provider quota reached.',
+  usage_limit: 'LLM provider rate limit or quota reached.',
+  context_limit: 'LLM provider context limit exceeded.',
   unavailable: 'LLM provider is unavailable.',
   invalid_request: 'LLM provider rejected the request.',
   unknown: 'LLM provider request failed.',

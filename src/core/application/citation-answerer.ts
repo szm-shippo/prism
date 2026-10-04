@@ -1,5 +1,5 @@
 import type { ChunkRegistry } from '../index/chunk-registry';
-import type { LLMProvider } from '../provider/llm-provider';
+import type { LLMProvider, LLMResponse } from '../provider/llm-provider';
 import { QueryAnswerer } from './query-answerer';
 import type { ConversationExchange } from './conversation-history';
 
@@ -17,8 +17,7 @@ export interface SourceCitation {
   endLine: number;
 }
 
-export interface CitedAnswer {
-  content: string;
+export interface CitedAnswer extends LLMResponse {
   citations: SourceCitation[];
 }
 
@@ -47,7 +46,7 @@ export class CitationAnswerer {
     const response = await answerer.answer(query, context, history);
     const available = new Map(usedChunks.map((chunk) => [chunk.chunkId, chunk.sourceId]));
     const citations = new Map<string, SourceCitation>();
-    const content = response.replace(/\[cite:([^\]\r\n]+)\]/gu, (_marker, chunkId: string) => {
+    const content = response.content.replace(/\[cite:([^\]\r\n]+)\]/gu, (_marker, chunkId: string) => {
       const sourceId = available.get(chunkId);
       if (!sourceId) return '';
       const provenance = this.chunks.provenance(chunkId);
@@ -55,6 +54,6 @@ export class CitationAnswerer {
       if (!citations.has(chunkId)) citations.set(chunkId, { chunkId, ...provenance });
       return `[^${[...citations.keys()].indexOf(chunkId) + 1}]`;
     });
-    return { content, citations: [...citations.values()] };
+    return { ...response, content, citations: [...citations.values()] };
   }
 }

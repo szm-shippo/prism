@@ -1,4 +1,4 @@
-import type { LLMContext, LLMProvider } from '../provider/llm-provider';
+import type { LLMContext, LLMProvider, LLMResponse } from '../provider/llm-provider';
 import { selectHistory, type ConversationExchange } from './conversation-history';
 
 type QueryIntent = 'definition' | 'comparison' | 'troubleshooting' | 'summary' | 'procedure' | 'general';
@@ -25,13 +25,13 @@ const formats: Record<QueryIntent, string> = {
 export class QueryAnswerer {
   constructor(private readonly provider: Pick<LLMProvider, 'generate'>) {}
 
-  async answer(query: string, context: readonly LLMContext[], history: readonly ConversationExchange[] = []): Promise<string> {
+  async answer(query: string, context: readonly LLMContext[], history: readonly ConversationExchange[] = []): Promise<LLMResponse> {
     const question = query.trim();
     if (!question) throw new Error('A non-empty query is required.');
     if (context.some(({ sourceId, content }) => !sourceId.trim() || !content.trim())) {
       throw new Error('Retrieved context must have a source ID and content.');
     }
-    if (context.length === 0) return 'No relevant Vault context was found for this question.';
+    if (context.length === 0) return { content: 'No relevant Vault context was found for this question.' };
     const response = await this.provider.generate({
       messages: [
         {
@@ -46,7 +46,7 @@ export class QueryAnswerer {
       ],
       context,
     });
-    if (!response.content.trim()) throw new Error('The answer provider returned an empty response.');
-    return response.content;
+    if (!response.content.trim() && !response.incompleteReason) throw new Error('The answer provider returned an empty response.');
+    return response;
   }
 }
