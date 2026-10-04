@@ -35,6 +35,7 @@ export default class PrismPlugin extends Plugin {
   private dataWrite: Promise<void> = Promise.resolve();
   private rebuildState: 'ready' | 'rebuilding' | 'failed' = 'ready';
   private rebuildPromise?: Promise<void>;
+  private chatOpening?: Promise<void>;
   private codexAuth?: CodexAuth;
   private codexPrompt?: DevicePrompt;
   private prismSettingTab?: PrismSettingTab;
@@ -316,10 +317,33 @@ export default class PrismPlugin extends Plugin {
     return this.ragPipeline.answer(query, history);
   }
 
-  private async openChatView(): Promise<void> {
+  private openChatView(): Promise<void> {
+    if (!this.chatOpening) {
+      this.chatOpening = this.showChatInSidebar().finally(() => { this.chatOpening = undefined; });
+    }
+    return this.chatOpening;
+  }
+
+  private async showChatInSidebar(): Promise<void> {
     const workspace = this.app.workspace;
-    const leaf = workspace.getLeavesOfType(CHAT_VIEW_TYPE)[0] ?? workspace.getLeaf(true);
-    await leaf.setViewState({ type: CHAT_VIEW_TYPE, active: true });
+    const existing = workspace.getLeavesOfType(CHAT_VIEW_TYPE)[0];
+    if (existing?.getRoot() === workspace.rightSplit) {
+      await workspace.revealLeaf(existing);
+      return;
+    }
+    const leaf = workspace.getRightLeaf(false);
+    if (!leaf) throw new Error('Right sidebar is unavailable.');
+    if (existing) {
+      await existing.loadIfDeferred();
+      const view = existing.view;
+      // Reopen the same view so its conversation and in-flight answer survive the move.
+      await existing.setViewState({ type: 'empty' });
+      view.leaf = leaf;
+      await leaf.open(view);
+      existing.detach();
+    } else {
+      await leaf.setViewState({ type: CHAT_VIEW_TYPE, active: true });
+    }
     await workspace.revealLeaf(leaf);
   }
 
