@@ -185,8 +185,14 @@ export class PrismChatView extends ItemView {
     conversation.empty();
     for (const [index, entry] of this.turns.entries()) {
       const turn = conversation.createDiv({ cls: 'prism-ask-turn' });
-      turn.createEl('p', { cls: 'prism-ask-question', text: entry.question });
-      const response = turn.createDiv({ cls: 'prism-ask-answer' });
+      Object.assign(turn.style, {
+        display: 'flex', flexDirection: 'column', gap: '8px', marginBottom: '16px', minWidth: '0',
+      });
+      const user = this.createMessage(turn, 'You');
+      const question = user.createEl('p', { cls: 'prism-ask-question', text: entry.question });
+      Object.assign(question.style, { margin: '0', whiteSpace: 'pre-wrap' });
+      const assistant = this.createMessage(turn, 'Prism');
+      const response = assistant.createDiv({ cls: 'prism-ask-answer' });
       response.style.whiteSpace = 'pre-wrap';
       const sources = turn.createDiv();
       const status = turn.createEl('p', { attr: { role: 'status', 'aria-live': 'polite' } });
@@ -220,6 +226,21 @@ export class PrismChatView extends ItemView {
       }
     }
     conversation.scrollTop = conversation.scrollHeight;
+  }
+
+  private createMessage(turn: HTMLDivElement, speaker: 'You' | 'Prism'): HTMLDivElement {
+    const message = turn.createDiv({ cls: speaker === 'You' ? 'prism-ask-user-message' : 'prism-ask-assistant-message' });
+    Object.assign(message.style, {
+      alignSelf: speaker === 'You' ? 'flex-end' : 'flex-start',
+      boxSizing: 'border-box', minWidth: '0', maxWidth: '90%',
+      padding: '10px 12px', borderRadius: '12px',
+      border: '1px solid var(--background-modifier-border)',
+      backgroundColor: speaker === 'You' ? 'var(--background-secondary)' : 'var(--background-primary)',
+      color: 'var(--text-normal)', overflowWrap: 'anywhere',
+    });
+    const label = message.createEl('div', { cls: 'prism-ask-speaker', text: speaker });
+    Object.assign(label.style, { fontWeight: '600', marginBottom: '4px' });
+    return message;
   }
 
   private renderAnswer(response: HTMLDivElement, status: HTMLElement, answer: CitedAnswer): void {
