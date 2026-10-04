@@ -72,7 +72,7 @@ export class PrismChatView extends ItemView {
     this.contentEl.addClass('prism-ask-view');
     Object.assign(this.contentEl.style, {
       display: 'flex', flexDirection: 'column', boxSizing: 'border-box',
-      height: '100%', minHeight: '0', overflow: 'hidden',
+      height: '100%', minHeight: '0', minWidth: '0', overflow: 'hidden', overflowWrap: 'anywhere',
     });
     const heading = this.contentEl.createEl('h2', { text: 'Ask Prism' });
     heading.style.flex = 'none';
@@ -214,6 +214,7 @@ export class PrismChatView extends ItemView {
             text: `${citation.path} (lines ${citation.startLine}–${citation.endLine})`,
           });
           link.type = 'button';
+          Object.assign(link.style, { maxWidth: '100%', whiteSpace: 'normal', overflowWrap: 'anywhere', textAlign: 'left' });
           link.addEventListener('click', () => this.openSource(citation, status));
         }
       }

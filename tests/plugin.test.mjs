@@ -298,15 +298,34 @@ async function loadPlugin(savedData, failSave = false, storedSecrets = new Map()
   const leaves = [];
   const revealed = [];
 
+  const rootSplit = {};
+  const rightSplit = { collapsed: true };
+
   class MockLeaf {
+    constructor(root = rootSplit) { this.root = root; }
+    getRoot() { return this.root; }
+    async loadIfDeferred() {}
     async openFile(file) { openedFiles.push(file); }
+    async open(view) {
+      await this.view?.onClose();
+      this.view = view;
+      this.state = { type: view.getViewType() };
+      await view.onOpen();
+      return view;
+    }
     async setViewState(state) {
+      const changed = this.state?.type !== state.type;
+      if (changed) {
+        await this.view?.onClose();
+        this.view = undefined;
+      }
       this.state = state;
-      if (!this.view) {
+      if (!this.view && state.type !== 'empty') {
         this.view = viewFactories.get(state.type)(this);
         await this.view.onOpen();
       }
     }
+    detach() { leaves.splice(leaves.indexOf(this), 1); }
   }
 
   class MockTFile {
@@ -321,9 +340,14 @@ async function loadPlugin(savedData, failSave = false, storedSecrets = new Map()
   class MockPlugin {
     manifest = manifest;
     app = { workspace: {
+      rootSplit, rightSplit,
       getLeaf() { const leaf = new MockLeaf(); leaves.push(leaf); return leaf; },
+      getRightLeaf() { const leaf = new MockLeaf(rightSplit); leaves.push(leaf); return leaf; },
       getLeavesOfType(type) { return leaves.filter((leaf) => leaf.state?.type === type); },
-      async revealLeaf(leaf) { revealed.push(leaf); },
+      async revealLeaf(leaf) {
+        if (leaf.root === rightSplit) rightSplit.collapsed = false;
+        revealed.push(leaf);
+      },
     }, secretStorage: {
       setSecret(id, value) { storedSecrets.set(id, value); },
       getSecret(id) { return storedSecrets.get(id) ?? null; },
@@ -482,7 +506,7 @@ async function loadPlugin(savedData, failSave = false, storedSecrets = new Map()
     requests, openedFiles, commands, ribbonIcons, leaves, revealed, modals };
 }
 
-test('Ask command opens one view and submits a query through RAG with actionable citations', async () => {
+test('Ask command opens one sidebar view and submits a query through RAG with actionable citations', async () => {
   const { plugin, listeners, MockTFile, commands, ribbonIcons, leaves, revealed, requests, writes,
     openedFiles } =
     await loadPlugin(null);
@@ -496,6 +520,8 @@ test('Ask command opens one view and submits a query through RAG with actionable
   await open.callback();
   assert.equal(leaves.length, 1);
   assert.equal(revealed.length, 1);
+  assert.equal(leaves[0].getRoot(), plugin.app.workspace.rightSplit);
+  assert.equal(plugin.app.workspace.rightSplit.collapsed, false);
   const view = leaves[0].view;
   assert.equal(view.getDisplayText(), 'Prism Ask');
   const input = findElement(view.contentEl, (element) => element.tag === 'textarea');
@@ -530,6 +556,99 @@ test('Ask command opens one view and submits a query through RAG with actionable
   await ribbonIcons[0].callback();
   assert.equal(leaves.filter((leaf) => leaf.state?.type === 'prism-chat').length, 1);
   assert.equal(revealed.length, 2);
+});
+
+test('Ask command and ribbon opened together reuse one sidebar view without replacing other panes', async () => {
+  const { plugin, commands, ribbonIcons, leaves } = await loadPlugin(null);
+  const workspace = plugin.app.workspace;
+  const note = workspace.getLeaf();
+  note.state = { type: 'markdown' };
+  const otherSidebar = workspace.getRightLeaf();
+  otherSidebar.state = { type: 'outline' };
+  const open = commands.find((command) => command.id === 'open-chat').callback;
+  await Promise.all([open(), ribbonIcons[0].callback(), open()]);
+  const chat = leaves.find((leaf) => leaf.state?.type === 'prism-chat');
+  assert.equal(leaves.length, 3);
+  assert.equal(chat.getRoot(), workspace.rightSplit);
+  assert.equal(note.state.type, 'markdown');
+  assert.equal(otherSidebar.state.type, 'outline');
+  workspace.rightSplit.collapsed = true;
+  await open();
+  assert.equal(workspace.rightSplit.collapsed, false);
+  assert.equal(leaves.length, 3);
+  assert.equal(leaves.find((leaf) => leaf.state?.type === 'prism-chat'), chat);
+});
+
+test('Ask moves a central conversation to the sidebar preserving answers, citations and draft', async () => {
+  const { plugin, commands, leaves } = await loadPlugin(null);
+  const workspace = plugin.app.workspace;
+  const central = workspace.getLeaf();
+  await central.setViewState({ type: 'prism-chat' });
+  const view = central.view;
+  plugin.answerQuery = async () => ({ content: 'Saved answer [^1]', citations: [{
+    sourceId: 'source', chunkId: 'chunk', path: 'a-very-long-source-name.md', startLine: 1, endLine: 2,
+  }] });
+  const input = findElement(view.contentEl, (element) => element.tag === 'textarea');
+  input.value = 'First question';
+  await findElement(view.contentEl, (element) => element.tag === 'form').submit();
+  input.value = 'Unsent follow-up';
+  await commands.find((command) => command.id === 'open-chat').callback();
+  assert.equal(leaves.length, 1);
+  assert.equal(leaves[0].getRoot(), workspace.rightSplit);
+  assert.equal(leaves[0].view, view);
+  assert.equal(view.leaf, leaves[0]);
+  assert.equal(findElement(view.contentEl, (element) => element.tag === 'textarea').value, 'Unsent follow-up');
+  assert.match(visibleText(view.contentEl), /First question.*Saved answer/u);
+  const source = findElement(view.contentEl, (element) => element.tag === 'button' && element.textContent.includes('a-very-long'));
+  assert.equal(source.style.maxWidth, '100%');
+  assert.equal(source.style.whiteSpace, 'normal');
+  assert.equal(source.style.overflowWrap, 'anywhere');
+});
+
+test('Ask moves an in-flight central answer to the sidebar without losing or resending it', async () => {
+  const { plugin, commands, leaves } = await loadPlugin(null);
+  const workspace = plugin.app.workspace;
+  const central = workspace.getLeaf();
+  await central.setViewState({ type: 'prism-chat' });
+  const view = central.view;
+  let finish;
+  let calls = 0;
+  plugin.answerQuery = () => { calls++; return new Promise((resolve) => { finish = resolve; }); };
+  findElement(view.contentEl, (element) => element.tag === 'textarea').value = 'Pending question';
+  const pending = findElement(view.contentEl, (element) => element.tag === 'form').submit();
+  await commands.find((command) => command.id === 'open-chat').callback();
+  assert.equal(leaves.length, 1);
+  assert.equal(leaves[0].view, view);
+  assert.equal(leaves[0].getRoot(), workspace.rightSplit);
+  assert.match(visibleText(view.contentEl), /Answering/);
+  assert.equal(findElement(view.contentEl, (element) => element.tag === 'textarea').disabled, true);
+  finish({ content: 'Moved answer', citations: [] });
+  await pending;
+  assert.equal(calls, 1);
+  assert.match(visibleText(view.contentEl), /Moved answer/);
+  assert.equal(findElement(view.contentEl, (element) => element.tag === 'textarea').value, '');
+  assert.equal(findElement(view.contentEl, (element) => element.tag === 'textarea').disabled, false);
+});
+
+test('Ask preserves a central conversation when the sidebar is unavailable and can retry opening', async () => {
+  const { plugin, commands, leaves, notices } = await loadPlugin(null);
+  const workspace = plugin.app.workspace;
+  const central = workspace.getLeaf();
+  await central.setViewState({ type: 'prism-chat' });
+  const view = central.view;
+  findElement(view.contentEl, (element) => element.tag === 'textarea').value = 'Keep this draft';
+  const getRightLeaf = workspace.getRightLeaf;
+  workspace.getRightLeaf = () => null;
+  const open = commands.find((command) => command.id === 'open-chat').callback;
+  await open();
+  assert.match(notices.at(-1), /could not open the Ask view/);
+  assert.equal(leaves[0].view, view);
+  assert.equal(findElement(view.contentEl, (element) => element.tag === 'textarea').value, 'Keep this draft');
+  workspace.getRightLeaf = getRightLeaf;
+  await open();
+  assert.equal(leaves.length, 1);
+  assert.equal(leaves[0].getRoot(), workspace.rightSplit);
+  assert.equal(leaves[0].view, view);
 });
 
 test('Ask keeps the input after a scrollable conversation and orders each turn as question then answer and sources', async () => {
