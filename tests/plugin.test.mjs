@@ -547,7 +547,7 @@ test('Ask command opens one sidebar view and submits a query through RAG with ac
   assert.equal(openedFiles.length, 2);
   plugin.app.vault.files = [];
   await inline.click();
-  assert.match(findElement(view.contentEl, (element) => element.attributes?.role === 'status').textContent,
+  assert.match(findElement(view.contentEl, (element) => element.classes.includes('prism-ask-source-status')).textContent,
     /Source is unavailable/);
   assert.equal(openedFiles.length, 2);
   assert.equal(requests.length, 1);
@@ -1033,9 +1033,143 @@ test('citation open errors remain safe in the Ask view', async () => {
   assert.equal(visibleText(answer), 'Answer [^1] and [^9]');
   assert.equal(answer.children.filter((child) => child.tag === 'button').length, 1);
   await findElement(answer, (element) => element.tag === 'button').click();
-  const status = findElement(view.contentEl, (element) => element.attributes?.role === 'status');
+  const status = findElement(view.contentEl, (element) => element.classes.includes('prism-ask-source-status'));
   assert.equal(status.textContent, 'Could not open the source. Try again.');
   assert.doesNotMatch(status.textContent, /private note contents/);
+  assert.equal(findElement(view.contentEl, (element) => element.classes.includes('prism-ask-current-status')).textContent,
+    'Answer ready. Output complete.');
+});
+
+test('connection test does not report success for an output limit response', async () => {
+  const secrets = new Map([['prism-codex-credential', JSON.stringify({
+    accessToken: 'fixture-access', refreshToken: 'fixture-refresh', accountId: 'account-1',
+    expiresAt: Date.now() + 3600_000,
+  })]]);
+  const { plugin } = await loadPlugin({ llmConnection: 'chatgpt-codex', codexModel: 'saved' }, false, secrets,
+    (request) => request.url.includes('/codex/responses') ? { status: 200,
+      text: 'data: {"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"}}}\n\n',
+    } : undefined);
+  await assert.rejects(plugin.testCodexConnection(), (error) => error.code === 'unknown');
+});
+
+test('current Ask status survives scrolling, validation, pending reopen, failure, Retry and reset', async () => {
+  const { plugin, commands, leaves } = await loadPlugin(null);
+  await commands.find((command) => command.id === 'open-chat').callback();
+  const view = leaves[0].view;
+  const get = (predicate) => findElement(view.contentEl, predicate);
+  const current = () => get((el) => el.classes.includes('prism-ask-current-status'));
+  const form = () => get((el) => el.tag === 'form');
+  const input = () => get((el) => el.tag === 'textarea');
+  const conversation = () => get((el) => el.classes.includes('prism-ask-conversation'));
+  assert.equal(current().attributes['data-state'], 'idle');
+  assert.equal(current().attributes['aria-atomic'], 'true');
+  assert.equal(view.contentEl.children.includes(current()), true);
+  await form().submit();
+  assert.equal(current().attributes['data-state'], 'idle');
+  assert.equal(conversation().children.length, 0);
+  let reject;
+  plugin.answerQuery = () => new Promise((_resolve, fail) => { reject = fail; });
+  input().value = 'Question';
+  const pending = form().submit();
+  conversation().scrollTop = 0;
+  assert.equal(current().attributes['data-state'], 'pending');
+  await view.onClose();
+  await view.onOpen();
+  assert.equal(current().attributes['data-state'], 'pending');
+  assert.equal(input().disabled, true);
+  reject(new Error('private failure'));
+  await pending;
+  assert.equal(current().attributes['data-state'], 'failed');
+  assert.doesNotMatch(current().textContent, /private failure/);
+  assert.equal(input().value, 'Question');
+  let resolve;
+  plugin.answerQuery = () => new Promise((finish) => { resolve = finish; });
+  const retry = get((el) => el.textContent === 'Retry').click();
+  assert.equal(current().attributes['data-state'], 'pending');
+  resolve({ content: 'Answer', citations: [] });
+  await retry;
+  assert.equal(conversation().children.length, 1);
+  assert.equal(current().attributes['data-state'], 'complete');
+  await view.onClose();
+  await view.onOpen();
+  assert.equal(current().attributes['data-state'], 'complete');
+  await get((el) => el.textContent === 'New conversation').click();
+  assert.equal(current().attributes['data-state'], 'idle');
+  assert.equal(input().value, '');
+});
+
+test('incomplete Ask answers preserve text and citations, keep input, and stay out of successful history', async () => {
+  for (const [reason, text] of [['output_limit', 'Partial [^1]'], ['output_limit', ''], ['unknown', 'Partial [^1]']]) {
+    const { plugin, commands, leaves } = await loadPlugin(null);
+    await commands.find((command) => command.id === 'open-chat').callback();
+    const view = leaves[0].view;
+    const get = (predicate) => findElement(view.contentEl, predicate);
+    const input = get((el) => el.tag === 'textarea');
+    const form = get((el) => el.tag === 'form');
+    const current = get((el) => el.classes.includes('prism-ask-current-status'));
+    const citation = { sourceId: 'source', chunkId: 'chunk', path: 'note.md', startLine: 1, endLine: 2 };
+    plugin.answerQuery = async () => ({ content: text, incompleteReason: reason, citations: text ? [citation] : [] });
+    input.value = 'Question';
+    await form.submit();
+    assert.equal(current.attributes['data-state'], 'failed');
+    assert.match(current.textContent, reason === 'output_limit' ? /output token limit/ : /stopped before completion/);
+    assert.doesNotMatch(current.textContent, /Answer ready/);
+    assert.equal(input.value, 'Question');
+    assert.equal(visibleText(get((el) => el.classes.includes('prism-ask-answer'))), text);
+    if (text) assert.ok(get((el) => el.textContent === 'note.md (lines 1–2)'));
+    await view.onClose();
+    await view.onOpen();
+    assert.equal(get((el) => el.classes.includes('prism-ask-current-status')).attributes['data-state'], 'failed');
+    let history;
+    plugin.answerQuery = async (_query, context) => { history = structuredClone(context); return { content: 'Complete', citations: [] }; };
+    get((el) => el.tag === 'textarea').value = 'Follow-up';
+    await get((el) => el.tag === 'form').submit();
+    assert.deepEqual(history, []);
+    assert.equal(get((el) => el.classes.includes('prism-ask-current-status')).attributes['data-state'], 'complete');
+  }
+});
+
+test('Retry of an incomplete answer shows pending and retains partial text when the retry fails', async () => {
+  const { plugin, commands, leaves } = await loadPlugin(null);
+  await commands.find((command) => command.id === 'open-chat').callback();
+  const view = leaves[0].view;
+  const get = (predicate) => findElement(view.contentEl, predicate);
+  plugin.answerQuery = async () => ({ content: 'Partial', incompleteReason: 'output_limit', citations: [] });
+  get((el) => el.tag === 'textarea').value = 'Question';
+  await get((el) => el.tag === 'form').submit();
+  let fail;
+  plugin.answerQuery = () => new Promise((_resolve, reject) => { fail = reject; });
+  const retry = get((el) => el.textContent === 'Retry').click();
+  assert.equal(get((el) => el.classes.includes('prism-ask-current-status')).attributes['data-state'], 'pending');
+  fail(new Error('private retry failure'));
+  await retry;
+  assert.equal(get((el) => el.classes.includes('prism-ask-current-status')).attributes['data-state'], 'failed');
+  assert.equal(visibleText(get((el) => el.classes.includes('prism-ask-answer'))), 'Partial');
+});
+
+test('Ask explains explicit provider limits without exposing raw provider errors', async () => {
+  for (const [status, code, expected] of [[400, 'context_length_exceeded', /Shorten your question/],
+    [429, 'insufficient_quota', /Check your account usage/],
+    [429, 'rate_limit_exceeded', /rate limit reached/],
+    [429, 'unrecognized', /rate limit or quota/],
+    [401, 'unrecognized', /Reconnect/], [503, 'unrecognized', /unavailable/],
+    [400, 'unrecognized', /selected model/]]) {
+    const { plugin, commands, leaves, listeners, MockTFile } = await loadPlugin(null, false, new Map(),
+      () => ({ status, text: JSON.stringify({ error: { code, message: 'private credential and note' } }) }));
+    await plugin.setLlmModel('answer-model');
+    plugin.setLlmApiKey('fixture-key');
+    const file = new MockTFile('facts.md', '# Prism');
+    plugin.app.vault.files = [file];
+    await listeners.get('create')(file);
+    await commands.find((command) => command.id === 'open-chat').callback();
+    const view = leaves[0].view;
+    findElement(view.contentEl, (el) => el.tag === 'textarea').value = 'Prism';
+    await findElement(view.contentEl, (el) => el.tag === 'form').submit();
+    const current = findElement(view.contentEl, (el) => el.classes.includes('prism-ask-current-status'));
+    assert.equal(current.attributes['data-state'], 'failed');
+    assert.match(current.textContent, expected);
+    assert.doesNotMatch(visibleText(view.contentEl), /private credential|fixture-key/);
+  }
 });
 
 test('citation opens the current Markdown path after a move and ignores missing sources', async () => {

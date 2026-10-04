@@ -1,39 +1,14 @@
 import { requestUrl, type RequestUrlResponse } from 'obsidian';
 import { LLMProviderError, type LLMProvider, type LLMRequest, type LLMResponse } from '../core/provider/llm-provider';
+import { parsePayload, providerError, responseOutput } from './llm-response';
 
 type Request = typeof requestUrl;
 
 function responseError(status: number): LLMProviderError {
   if (status === 401 || status === 403) return new LLMProviderError('authentication');
-  if (status === 429) return new LLMProviderError('rate_limit');
+  if (status === 429) return new LLMProviderError('usage_limit');
   if (status >= 500) return new LLMProviderError('unavailable');
   return new LLMProviderError('invalid_request');
-}
-
-function outputText(response: RequestUrlResponse): string {
-  let payload: unknown;
-  try {
-    payload = JSON.parse(response.text);
-  } catch {
-    throw new LLMProviderError('unknown');
-  }
-  if (typeof payload !== 'object' || payload === null || !('output' in payload) ||
-      !Array.isArray(payload.output)) {
-    throw new LLMProviderError('unknown');
-  }
-  const parts: string[] = [];
-  for (const item of payload.output) {
-    if (typeof item !== 'object' || item === null || !('type' in item) || item.type !== 'message') continue;
-    if (!('content' in item) || !Array.isArray(item.content)) throw new LLMProviderError('unknown');
-    for (const content of item.content) {
-      if (typeof content === 'object' && content !== null && 'type' in content &&
-          content.type === 'output_text' && 'text' in content && typeof content.text === 'string') {
-        parts.push(content.text);
-      }
-    }
-  }
-  if (parts.length === 0) throw new LLMProviderError('unknown');
-  return parts.join('');
 }
 
 export class OpenAILLMProvider implements LLMProvider {
@@ -76,7 +51,8 @@ export class OpenAILLMProvider implements LLMProvider {
     } catch {
       throw new LLMProviderError('unavailable');
     }
-    if (response.status < 200 || response.status >= 300) throw responseError(response.status);
-    return { content: outputText(response) };
+    const payload = parsePayload(response.text);
+    if (response.status < 200 || response.status >= 300) throw providerError(payload, responseError(response.status).code);
+    return responseOutput(payload);
   }
 }

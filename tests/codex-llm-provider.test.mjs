@@ -66,3 +66,45 @@ test('Codex answer rejects incomplete stream and redacts provider failures', asy
     return true;
   });
 });
+
+test('Codex terminal incomplete events keep text and never claim completion', async () => {
+  for (const [reason, expected] of [['max_output_tokens', 'output_limit'], ['other', 'unknown']]) {
+    for (const content of ['Partial', '']) {
+      const { provider } = createProvider([{ status: 200, text:
+        `data: ${JSON.stringify({ type: 'response.output_text.delta', delta: content })}\n\n` +
+        `data: ${JSON.stringify({ type: 'response.incomplete', response: {
+          status: 'incomplete', incomplete_details: { reason },
+        } })}\n\n`,
+      }]);
+      assert.deepEqual(structuredClone(await provider.generate(query)), { content, incompleteReason: expected });
+    }
+  }
+});
+
+test('Codex HTTP and stream errors classify only explicit limit codes', async () => {
+  for (const [code, expected] of [['context_length_exceeded', 'context_limit'],
+    ['insufficient_quota', 'quota'], ['usage_limit_reached', 'quota'], ['rate_limit_exceeded', 'rate_limit'], ['other', 'unknown']]) {
+    const { provider } = createProvider([{ status: 200, text:
+      `data: ${JSON.stringify({ type: 'response.failed', response: {
+        error: { code, message: 'private credential and note' },
+      } })}\n\n`,
+    }]);
+    await assert.rejects(provider.generate(query), (error) => {
+      assert.equal(error.code, expected);
+      assert.doesNotMatch(error.message, /private credential|note/);
+      return true;
+    });
+  }
+  const http = createProvider([{ status: 429, text: '{}' }]);
+  await assert.rejects(http.provider.generate(query), (error) => error.code === 'usage_limit');
+  const explicit = createProvider([{ status: 429, text: '{"error":{"code":"insufficient_quota"}}' }]);
+  await assert.rejects(explicit.provider.generate(query), (error) => error.code === 'quota');
+});
+
+test('Codex completed event can supply final text when deltas are missing', async () => {
+  const { provider } = createProvider([{ status: 200, text: `data: ${JSON.stringify({
+    type: 'response.completed', response: { status: 'completed', output: [{ type: 'message',
+      content: [{ type: 'output_text', text: 'Final' }] }] },
+  })}\n\n` }]);
+  assert.deepEqual(structuredClone(await provider.generate(query)), { content: 'Final' });
+});

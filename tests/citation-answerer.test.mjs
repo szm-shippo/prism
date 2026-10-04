@@ -47,6 +47,16 @@ test('citation answer retains chunk IDs and resolves only used evidence to curre
   }]);
 });
 
+test('partial answers keep their termination reason through citation conversion', async () => {
+  const answerer = new CitationAnswerer({ generate: async () => ({
+    content: 'Partial claim [cite:chunk-one]', incompleteReason: 'output_limit',
+  }) }, { provenance: () => ({ sourceId: 'source-one', path: 'one.md', startLine: 1, endLine: 2 }) }, () => true);
+  const answer = await answerer.answer('Explain', [{ chunkId: 'chunk-one', sourceId: 'source-one', content: 'Evidence' }]);
+  assert.equal(answer.content, 'Partial claim [^1]');
+  assert.equal(answer.incompleteReason, 'output_limit');
+  assert.equal(answer.citations.length, 1);
+});
+
 test('unknown, deleted, and mismatched chunks never produce citations', async () => {
   const answerer = new CitationAnswerer({ generate: async () => ({
     content: 'Claim [cite:unknown] [cite:chunk-one] [cite:chunk-two]',

@@ -1,19 +1,19 @@
 import { requestUrl, type RequestUrlResponse } from 'obsidian';
 import { LLMProviderError, type LLMProvider, type LLMRequest, type LLMResponse } from '../core/provider/llm-provider';
 import type { CodexAuth } from './codex-auth';
+import { parsePayload, providerError, responseOutput } from './llm-response';
 
 const RESPONSES_URL = 'https://chatgpt.com/backend-api/codex/responses';
 
 function errorForStatus(status: number): LLMProviderError {
   if (status === 401) return new LLMProviderError('authentication');
   if (status === 403) return new LLMProviderError('invalid_request');
-  if (status === 429) return new LLMProviderError('rate_limit');
+  if (status === 429) return new LLMProviderError('usage_limit');
   if (status >= 500) return new LLMProviderError('unavailable');
   return new LLMProviderError('invalid_request');
 }
 
-function eventText(response: RequestUrlResponse): string {
-  let completed = false;
+function eventOutput(response: RequestUrlResponse): LLMResponse {
   let content = '';
   for (const block of response.text.split(/\r?\n\r?\n/)) {
     const data = block.split(/\r?\n/).filter((line) => line.startsWith('data:'))
@@ -26,13 +26,14 @@ function eventText(response: RequestUrlResponse): string {
       event = parsed as Record<string, unknown>;
     } catch { throw new LLMProviderError('unknown'); }
     if (event.type === 'response.output_text.delta' && typeof event.delta === 'string') content += event.delta;
-    if (event.type === 'response.failed' || event.type === 'response.incomplete' || event.type === 'error') {
-      throw new LLMProviderError('unavailable');
+    if (event.type === 'response.failed' || event.type === 'error') {
+      throw providerError(event.response ?? event, 'unknown');
     }
-    if (event.type === 'response.completed') completed = true;
+    if (event.type === 'response.incomplete' || event.type === 'response.completed') {
+      return responseOutput(event.response ?? {}, content, event.type === 'response.incomplete');
+    }
   }
-  if (!completed || !content) throw new LLMProviderError('unknown');
-  return content;
+  throw new LLMProviderError('unknown');
 }
 
 export class CodexLLMProvider implements LLMProvider {
@@ -73,7 +74,7 @@ export class CodexLLMProvider implements LLMProvider {
       catch { throw new LLMProviderError('authentication'); }
       response = await send(access.token, access.accountId);
     }
-    if (response.status < 200 || response.status >= 300) throw errorForStatus(response.status);
-    return { content: eventText(response) };
+    if (response.status < 200 || response.status >= 300) throw providerError(parsePayload(response.text), errorForStatus(response.status).code);
+    return eventOutput(response);
   }
 }

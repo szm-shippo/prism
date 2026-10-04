@@ -63,7 +63,7 @@ test('remote LLM preserves chunk IDs for source citations', async () => {
 });
 
 test('provider and transport errors do not reveal request or credentials', async () => {
-  for (const [status, code] of [[401, 'authentication'], [429, 'rate_limit'], [500, 'unavailable']]) {
+  for (const [status, code] of [[401, 'authentication'], [429, 'usage_limit'], [500, 'unavailable']]) {
     const { provider } = providerWith({ status, text: 'credential and private note' });
     await assert.rejects(provider.generate(query), (error) => {
       assert.equal(error.code, code);
@@ -83,4 +83,41 @@ test('missing query and malformed API response fail safely', async () => {
 
   const malformed = providerWith({ status: 200, text: JSON.stringify({ output: [{ type: 'message', content: [] }] }) });
   await assert.rejects(malformed.provider.generate(query), /request failed/);
+});
+
+test('API errors classify explicit limit codes without exposing provider messages', async () => {
+  for (const [status, code, expected] of [
+    [400, 'context_length_exceeded', 'context_limit'],
+    [429, 'insufficient_quota', 'quota'],
+    [429, 'rate_limit_exceeded', 'rate_limit'],
+    [429, 'unrecognized', 'usage_limit'],
+    [400, 'unrecognized', 'invalid_request'],
+  ]) {
+    const { provider } = providerWith({ status, text: JSON.stringify({ error: {
+      code, message: 'private credential and note',
+    } }) });
+    await assert.rejects(provider.generate(query), (error) => {
+      assert.equal(error.code, expected);
+      assert.doesNotMatch(error.message, /private credential|note/);
+      return true;
+    });
+  }
+});
+
+test('API incomplete responses preserve partial output and distinguish known and unknown reasons', async () => {
+  for (const [reason, expected] of [['max_output_tokens', 'output_limit'], ['content_filter', 'unknown']]) {
+    for (const content of ['Partial [cite:chunk-1]', '']) {
+      const { provider } = providerWith({ status: 200, text: JSON.stringify({
+        status: 'incomplete', incomplete_details: { reason },
+        output: [{ type: 'message', content: [{ type: 'output_text', text: content }] }],
+      }) });
+      assert.deepEqual(structuredClone(await provider.generate(query)), { content, incompleteReason: expected });
+    }
+  }
+  for (const status of ['failed', 'in_progress', 'queued', 'cancelled']) {
+    const { provider } = providerWith({ status: 200, text: JSON.stringify({ status,
+      output: [{ type: 'message', content: [{ type: 'output_text', text: 'Not a completed answer' }] }],
+    }) });
+    await assert.rejects(provider.generate(query), (error) => error.code === 'unknown');
+  }
 });
