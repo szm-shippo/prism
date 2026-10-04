@@ -1,6 +1,7 @@
 spec/
 node_modules/
 main.js
+copilot-sdk-runtime.cjs
 target/
 local-embedding-worker.js
 ort-wasm-simd-threaded.jsep.mjs

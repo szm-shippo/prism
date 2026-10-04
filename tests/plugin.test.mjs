@@ -281,7 +281,8 @@ function visibleText(element) {
   return element.textContent + element.children.map(visibleText).join('');
 }
 
-async function loadPlugin(savedData, failSave = false, storedSecrets = new Map(), responseOverride) {
+async function loadPlugin(savedData, failSave = false, storedSecrets = new Map(), responseOverride,
+  isDesktopApp = true) {
   const manifest = JSON.parse(await readFile(new URL('../manifest.json', import.meta.url), 'utf8'));
   const bundle = await readFile(new URL('../main.js', import.meta.url), 'utf8');
   const module = { exports: {} };
@@ -300,6 +301,10 @@ async function loadPlugin(savedData, failSave = false, storedSecrets = new Map()
 
   const rootSplit = {};
   const rightSplit = { collapsed: true };
+
+  class MockFileSystemAdapter {
+    getBasePath() { return 'C:\\test-vault'; }
+  }
 
   class MockLeaf {
     constructor(root = rootSplit) { this.root = root; }
@@ -351,7 +356,9 @@ async function loadPlugin(savedData, failSave = false, storedSecrets = new Map()
     }, secretStorage: {
       setSecret(id, value) { storedSecrets.set(id, value); },
       getSecret(id) { return storedSecrets.get(id) ?? null; },
-    }, vault: {
+      }, vault: {
+      configDir: '.obsidian',
+      adapter: new MockFileSystemAdapter(),
       files: [],
       getMarkdownFiles() { return this.files; },
       getAbstractFileByPath(path) { return this.files.find((file) => file.path === path) ?? null; },
@@ -427,6 +434,7 @@ async function loadPlugin(savedData, failSave = false, storedSecrets = new Map()
         getValue() { return this.value; },
         onChange(handler) { this.change = handler; return this; },
         commit() { return listeners.get('change')?.(); },
+        blur() { return listeners.get('blur')?.(); },
       };
       callback(text);
       this.text = text;
@@ -459,11 +467,18 @@ async function loadPlugin(savedData, failSave = false, storedSecrets = new Map()
   runInNewContext(bundle, {
     crypto: webcrypto,
     TextEncoder,
+    AbortController,
+    URL,
+    URLSearchParams,
+    setTimeout,
+    clearTimeout,
     module,
     exports: module.exports,
     require(specifier) {
       assert.equal(specifier, 'obsidian');
       return {
+        FileSystemAdapter: MockFileSystemAdapter,
+        Platform: { isDesktopApp },
         Plugin: MockPlugin,
         ItemView: MockItemView,
         PluginSettingTab: MockPluginSettingTab,
@@ -1665,4 +1680,210 @@ test('disconnected Codex model is a dropdown even with no saved selection', asyn
   assert.equal(model.dropdown.options.get(''), 'No models available');
   await new Promise(setImmediate);
   assert.equal(requests.length, 0);
+});
+
+
+test('Copilot Desktop connection uses the selected model, fixed test prompt and RAG context without fallback', async () => {
+  const secrets = new Map([
+    ['prism-copilot-credential', JSON.stringify({ clientId: 'public-client-fixture', accessToken: 'copilot-token-fixture',
+      id: '73', login: 'copilot-user' })],
+    ['prism-llm-api-key', 'preserved-openai-key-fixture'],
+    ['prism-codex-credential', 'preserved-codex-credential-fixture'],
+  ]);
+  const listRequests = [];
+  const generateRequests = [];
+  const runtime = {
+    async listModels(request) {
+      listRequests.push(request);
+      return [{ id: 'copilot-model-fixture', name: 'Copilot Fixture' },
+        { id: 'disabled-fixture', name: 'Disabled fixture', policy: { state: 'disabled' } }];
+    },
+    async generate(request) {
+      generateRequests.push(request);
+      const chunk = request.context[0]?.chunkId;
+      return { content: chunk ? `Grounded answer [cite:${chunk}]` : 'OK' };
+    },
+  };
+  const saved = { llmConnection: 'github-copilot', copilotClientId: 'public-client-fixture',
+    copilotCliPath: 'C:\\Tools\\copilot.exe', copilotModel: 'copilot-model-fixture' };
+  const { plugin, tabs, requests, notices, listeners, MockTFile } = await loadPlugin(saved, false, secrets);
+  plugin.manifest.dir = '.obsidian/plugins/prism';
+  plugin.copilotRuntime = runtime;
+  tabs[0].display();
+  await plugin.refreshCopilotModels(true);
+  assert.equal(plugin.getCopilotStatus().modelState, 'ready');
+  assert.deepEqual(plugin.getCopilotStatus().models.map((model) => model.id), ['copilot-model-fixture']);
+  const testSetting = tabs[0].containerEl.children.find((item) => item.name === 'Test GitHub Copilot connection');
+  assert.match(testSetting.description, /Reply with OK/);
+  await testSetting.button.click();
+  assert.equal(generateRequests[0].modelId, 'copilot-model-fixture');
+  assert.equal(generateRequests[0].messages.length, 1);
+  assert.equal(generateRequests[0].messages[0].role, 'user');
+  assert.equal(generateRequests[0].messages[0].content, 'Reply with OK.');
+  assert.equal(generateRequests[0].context.length, 0);
+  assert.ok(notices.includes('Success: GitHub Copilot responded to the connection test.'));
+
+  const file = new MockTFile('copilot-fact.md', '# Moonlight\nMoonlight is a local RAG fixture.');
+  plugin.app.vault.files = [file];
+  await listeners.get('create')(file);
+  await plugin.answerQuery('Moonlight', [{ question: 'Earlier question', answer: 'Earlier answer' }]);
+  const ask = generateRequests.at(-1);
+  assert.equal(ask.modelId, 'copilot-model-fixture');
+  assert.ok(ask.context.some((item) => item.content.includes('Moonlight is a local RAG fixture.')));
+  assert.ok(ask.messages.some((message) => message.content.includes('Earlier question')));
+  assert.ok(listRequests.every((request) => request.token === 'copilot-token-fixture'));
+  assert.equal(requests.length, 0);
+  assert.equal(secrets.get('prism-llm-api-key'), 'preserved-openai-key-fixture');
+  assert.equal(secrets.get('prism-codex-credential'), 'preserved-codex-credential-fixture');
+
+  await plugin.setCopilotModel('unlisted-model-fixture');
+  const generatedBeforeRejectedModel = generateRequests.length;
+  await assert.rejects(plugin.testCopilotConnection(), (error) => error.code === 'invalid_request');
+  assert.equal(generateRequests.length, generatedBeforeRejectedModel);
+
+  await plugin.setCopilotModel('copilot-model-fixture');
+  runtime.generate = async () => { throw new Error('private SDK response details'); };
+  await assert.rejects(plugin.answerQuery('Moonlight'), (error) => {
+    assert.equal(error.code, 'unknown');
+    assert.doesNotMatch(error.message, /private SDK response details/);
+    return true;
+  });
+  assert.equal(requests.length, 0, 'Copilot failures must not fall back to the configured OpenAI API key.');
+});
+
+
+test('Copilot saved Desktop connection is unavailable on mobile without loading SDK or hiding existing connections', async () => {
+  const secrets = new Map([
+    ['prism-copilot-credential', JSON.stringify({ clientId: 'public-client-fixture', accessToken: 'copilot-token-fixture',
+      id: '73', login: 'copilot-user' })],
+    ['prism-llm-api-key', 'preserved-openai-key-fixture'],
+    ['prism-codex-credential', 'preserved-codex-credential-fixture'],
+  ]);
+  let runtimeCalls = 0;
+  const runtime = { async listModels() { runtimeCalls++; return []; }, async generate() { runtimeCalls++; return { content: 'unexpected' }; } };
+  const saved = { llmConnection: 'github-copilot', copilotClientId: 'public-client-fixture',
+    copilotCliPath: 'C:\\Tools\\copilot.exe', copilotModel: 'copilot-model-fixture' };
+  const { plugin, tabs, requests, storedSecrets } = await loadPlugin(saved, false, secrets, undefined, false);
+  plugin.copilotRuntime = runtime;
+  tabs[0].display();
+  const settings = tabs[0].containerEl.children;
+  const connection = settings.find((item) => item.name === 'LLM connection');
+  assert.ok(connection.dropdown.options.has('api-key'));
+  assert.ok(connection.dropdown.options.has('chatgpt-codex'));
+  assert.ok(connection.dropdown.options.has('github-copilot'));
+  assert.equal(settings.some((item) => item.name === 'GitHub OAuth App Client ID'), false);
+  assert.equal(settings.some((item) => item.name === 'GitHub Copilot CLI executable'), false);
+  assert.ok(settings.some((item) => item.tag === 'p' && /Desktop only/.test(item.text)));
+  await assert.rejects(plugin.refreshCopilotModels(), (error) => error.code === 'unavailable');
+  await assert.rejects(plugin.testCopilotConnection(), (error) => error.code === 'unavailable');
+  await assert.rejects(plugin.setLlmConnection('github-copilot'), (error) => error.code === 'unavailable');
+  assert.equal(runtimeCalls, 0);
+  assert.equal(requests.length, 0);
+  assert.equal(plugin.hasLlmApiKey(), true);
+  assert.equal(storedSecrets.get('prism-codex-credential'), 'preserved-codex-credential-fixture');
+  assert.equal(storedSecrets.get('prism-copilot-credential'), secrets.get('prism-copilot-credential'));
+});
+
+
+test('Copilot settings edits preserve focus until blur and immediately invalidate old credentials', async () => {
+  const credential = JSON.stringify({ clientId: 'old-public-client', accessToken: 'copilot-token-fixture',
+    id: '73', login: 'copilot-user' });
+  const secrets = new Map([['prism-copilot-credential', credential]]);
+  const { plugin, tabs, storedSecrets } = await loadPlugin({ llmConnection: 'github-copilot',
+    copilotClientId: 'old-public-client', copilotCliPath: 'C:\\Tools\\copilot.exe' }, false, secrets);
+  plugin.manifest.dir = '.obsidian/plugins/prism';
+  plugin.copilotRuntime = {
+    async listModels() { return [{ id: 'model-fixture', name: 'Model fixture' }]; },
+    async generate() { return { content: 'unused' }; },
+  };
+  tabs[0].display();
+  await plugin.refreshCopilotModels(true);
+  const originalChildren = tabs[0].containerEl.children;
+  const clientIdSetting = originalChildren.find((item) => item.name === 'GitHub OAuth App Client ID');
+  await clientIdSetting.text.change('new-public-client');
+  assert.equal(tabs[0].containerEl.children, originalChildren, 'typing must not rebuild and remove the focused control');
+  assert.equal(plugin.settings.copilotClientId, 'new-public-client');
+  assert.equal(plugin.getCopilotStatus().account, undefined);
+  assert.equal(storedSecrets.get('prism-copilot-credential'), '');
+  clientIdSetting.text.blur();
+  await new Promise(setImmediate);
+  assert.notEqual(tabs[0].containerEl.children, originalChildren, 'blur may redraw settings after queued saves finish');
+  assert.equal(tabs[0].containerEl.children.find((item) => item.name === 'GitHub OAuth App Client ID').text.value,
+    'new-public-client');
+});
+
+
+test('late model list from a previous Copilot account cannot replace the newly connected account catalog', async () => {
+  let releaseOldList;
+  const oldList = new Promise((resolve) => { releaseOldList = resolve; });
+  const secrets = new Map([['prism-copilot-credential', JSON.stringify({ clientId: 'public-client-fixture',
+    accessToken: 'old-account-token', id: '1', login: 'old-account' })]]);
+  let signalOldListStarted;
+  const oldListStarted = new Promise((resolve) => { signalOldListStarted = resolve; });
+  let signalNewListStarted;
+  const newListStarted = new Promise((resolve) => { signalNewListStarted = resolve; });
+  const runtime = {
+    async listModels(request) {
+      if (request.token === 'old-account-token') {
+        signalOldListStarted();
+        return oldList;
+      }
+      signalNewListStarted();
+      return [{ id: 'new-account-model', name: 'New account model' }];
+    },
+    async generate() { return { content: 'unused' }; },
+  };
+  const authTransport = async (request) => {
+    if (request.url.endsWith('/login/device/code')) return { status: 200, text: JSON.stringify({
+      device_code: 'new-account-device-code', user_code: 'ABCD-EFGH',
+      verification_uri: 'https://github.com/login/device', interval: 0.001, expires_in: 10,
+    }) };
+    if (request.url.endsWith('/login/oauth/access_token')) return { status: 200, text: JSON.stringify({
+      access_token: 'new-account-token',
+    }) };
+    if (request.url === 'https://api.github.com/user') return { status: 200,
+      text: JSON.stringify({ id: 2, login: 'new-account' }) };
+    return undefined;
+  };
+  const { plugin } = await loadPlugin({ llmConnection: 'github-copilot', copilotClientId: 'public-client-fixture',
+    copilotCliPath: 'C:\\Tools\\copilot.exe' }, false, secrets, authTransport);
+  plugin.manifest.dir = '.obsidian/plugins/prism';
+  plugin.copilotRuntime = runtime;
+  const previousCatalog = plugin.refreshCopilotModels(true);
+  await oldListStarted;
+  await plugin.startCopilotLogin();
+  await newListStarted;
+  await plugin.refreshCopilotModels(true);
+  assert.equal(plugin.getCopilotStatus().account.login, 'new-account');
+  assert.deepEqual(plugin.getCopilotStatus().models.map((model) => model.id), ['new-account-model']);
+  releaseOldList([{ id: 'stale-old-account-model', name: 'Stale old account model' }]);
+  await assert.rejects(previousCatalog);
+  assert.deepEqual(plugin.getCopilotStatus().models.map((model) => model.id), ['new-account-model']);
+  assert.equal(JSON.parse(secrets.get('prism-copilot-credential')).accessToken, 'new-account-token');
+});
+
+
+test('temporary GitHub token refresh failures keep credentials and remain distinct from authentication failure', async () => {
+  for (const [status, code] of [[429, 'rate_limit'], [503, 'unavailable']]) {
+    const credential = JSON.stringify({ clientId: 'public-client-fixture', accessToken: 'current-token-fixture',
+      refreshToken: 'refresh-token-fixture', accessExpiresAt: Date.now() - 1000,
+      refreshExpiresAt: Date.now() + 3_600_000, id: '73', login: 'copilot-user' });
+    const secrets = new Map([
+      ['prism-copilot-credential', credential],
+      ['prism-codex-credential', 'preserved-codex-credential-fixture'],
+      ['prism-llm-api-key', 'preserved-openai-key-fixture'],
+    ]);
+    const marker = 'private-github-refresh-response';
+    const { plugin, storedSecrets } = await loadPlugin({ copilotClientId: 'public-client-fixture' }, false, secrets,
+      (request) => request.url.endsWith('/login/oauth/access_token')
+        ? { status, text: JSON.stringify({ error: marker }) } : undefined);
+    await assert.rejects(plugin.copilotAuth.getAccessToken(), (error) => {
+      assert.equal(error.code, code);
+      assert.doesNotMatch(error.message, new RegExp(marker));
+      return true;
+    });
+    assert.equal(storedSecrets.get('prism-copilot-credential'), credential);
+    assert.equal(storedSecrets.get('prism-codex-credential'), 'preserved-codex-credential-fixture');
+    assert.equal(storedSecrets.get('prism-llm-api-key'), 'preserved-openai-key-fixture');
+  }
 });

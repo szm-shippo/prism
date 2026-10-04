@@ -4,8 +4,11 @@ export interface PluginSettings {
   searchMode: 'full-text' | 'local';
   showVaultNotice: boolean;
   llmModel: string;
-  llmConnection: 'api-key' | 'chatgpt-codex';
+  llmConnection: 'api-key' | 'chatgpt-codex' | 'github-copilot';
   codexModel: string;
+  copilotClientId: string;
+  copilotCliPath: string;
+  copilotModel: string;
   excludedPaths: string[];
 }
 
@@ -15,6 +18,9 @@ const DEFAULT_SETTINGS: PluginSettings = {
   llmModel: '',
   llmConnection: 'api-key',
   codexModel: 'gpt-5.4',
+  copilotClientId: '',
+  copilotCliPath: '',
+  copilotModel: '',
   excludedPaths: [],
 };
 
@@ -36,8 +42,12 @@ export function loadSettings(data: unknown): PluginSettings {
       ? saved.showVaultNotice
       : DEFAULT_SETTINGS.showVaultNotice,
     llmModel: typeof saved.llmModel === 'string' ? saved.llmModel : DEFAULT_SETTINGS.llmModel,
-    llmConnection: saved.llmConnection === 'chatgpt-codex' ? 'chatgpt-codex' : 'api-key',
+    llmConnection: saved.llmConnection === 'chatgpt-codex' || saved.llmConnection === 'github-copilot'
+      ? saved.llmConnection : 'api-key',
     codexModel: typeof saved.codexModel === 'string' ? saved.codexModel : DEFAULT_SETTINGS.codexModel,
+    copilotClientId: typeof saved.copilotClientId === 'string' ? saved.copilotClientId.trim() : '',
+    copilotCliPath: typeof saved.copilotCliPath === 'string' ? saved.copilotCliPath.trim() : '',
+    copilotModel: typeof saved.copilotModel === 'string' ? saved.copilotModel.trim() : '',
     excludedPaths,
   };
 }
