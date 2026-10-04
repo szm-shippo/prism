@@ -673,8 +673,8 @@ test('Ask keeps the input after a scrollable conversation and orders each turn a
   await form.submit();
   const turn = conversation.children[0];
   assert.ok(turn.classes.includes('prism-ask-turn'));
-  assert.equal(visibleText(turn.children[0]), 'YouFirst question');
-  assert.equal(visibleText(turn.children[1]), 'PrismFirst answer [^1]');
+  assert.equal(visibleText(turn.children[0]), 'First question');
+  assert.equal(visibleText(turn.children[1]), 'First answer [^1]');
   assert.match(visibleText(turn.children[2]), /fact\.md/);
   assert.equal(view.contentEl.children.at(-1), form);
 
@@ -688,7 +688,7 @@ test('Ask keeps the input after a scrollable conversation and orders each turn a
   assert.equal(input.style.boxSizing, 'border-box');
 });
 
-test('Ask identifies both speakers and preserves multiline text as safe text inside each message', async () => {
+test('Ask hides visible speaker labels while identifying speakers accessibly and preserving safe multiline text', async () => {
   const { plugin, commands, leaves } = await loadPlugin(null);
   await commands.find((command) => command.id === 'open-chat').callback();
   const view = leaves[0].view;
@@ -701,20 +701,22 @@ test('Ask identifies both speakers and preserves multiline text as safe text ins
   plugin.answerQuery = () => new Promise((resolve) => { finish = resolve; });
   input.value = question;
   const pending = form.submit();
-  assert.equal(visibleText(conversation.children[0].children[0]), `You${question}`);
-  assert.equal(visibleText(conversation.children[0].children[1]), 'Prism');
+  assert.equal(visibleText(conversation.children[0].children[0]), question);
+  assert.equal(visibleText(conversation.children[0].children[1]), '');
+  assert.equal(conversation.children[0].children[0].attributes['aria-label'], 'You');
+  assert.equal(conversation.children[0].children[1].attributes['aria-label'], 'Prism');
   assert.match(visibleText(conversation.children[0]), /Answering…/);
   finish({ content: answer, citations: [] });
   await pending;
   const turn = conversation.children[0];
-  assert.equal(visibleText(turn.children[0]), `You${question}`);
-  assert.equal(visibleText(turn.children[1]), `Prism${answer}`);
+  assert.equal(visibleText(turn.children[0]), question);
+  assert.equal(visibleText(turn.children[1]), answer);
   assert.equal(findElement(turn, (element) => element.tag === 'img' || element.tag === 'script'), undefined);
   await view.onClose();
   await view.onOpen();
   const reopened = findElement(view.contentEl, (element) => element.classes.includes('prism-ask-turn'));
-  assert.equal(visibleText(reopened.children[0]), `You${question}`);
-  assert.equal(visibleText(reopened.children[1]), `Prism${answer}`);
+  assert.equal(visibleText(reopened.children[0]), question);
+  assert.equal(visibleText(reopened.children[1]), answer);
 });
 
 test('Ask retains ordered turns with their own sources, bounds history and resets context without saving the conversation', async () => {
