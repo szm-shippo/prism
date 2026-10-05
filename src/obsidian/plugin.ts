@@ -1,4 +1,4 @@
-import { Notice, Plugin, PluginSettingTab, Setting, TFile } from 'obsidian';
+import { FileSystemAdapter, Notice, Platform, Plugin, PluginSettingTab, Setting, TFile } from 'obsidian';
 import { CitationAnswerer, type CitedAnswer, type SourceCitation } from '../core/application/citation-answerer';
 import { RagPipeline } from '../core/application/rag-pipeline';
 import type { ConversationExchange } from '../core/application/conversation-history';
@@ -15,13 +15,54 @@ import { SourceEventHandler } from './source-events';
 import { OpenAILLMProvider } from './openai-llm-provider';
 import { CodexAuth, CodexModelListError, type DevicePrompt } from './codex-auth';
 import { CodexLLMProvider } from './codex-llm-provider';
+import { clearLegacyCopilotCredential } from './copilot-auth';
+import { CopilotLLMProvider, CopilotLLMProviderError } from './copilot-llm-provider';
+import type { CopilotModelInfo, CopilotRuntimeErrorStage, CopilotSdkRuntime } from './copilot-sdk-runtime';
 import { LLMProviderError } from '../core/provider/llm-provider';
 import { CHAT_VIEW_TYPE, PrismChatView } from './chat-view';
-import { loadSettings, type PluginSettings } from '../settings';
+import { loadSettings, type CopilotAccount, type PluginSettings } from '../settings';
 import { LocalEmbeddingModel } from './local-embedding-model';
 import { LocalEmbeddingProvider } from './local-embedding-provider';
 import { LOCAL_MODEL_KEY } from '../core/provider/local-embedding-model';
 import { LocalEmbeddingError } from '../core/provider/local-embedding-error';
+
+function joinDesktopPath(root: string, directory: string, filename: string): string {
+  const separator = root.includes('\\') ? '\\' : '/';
+  const normalizedRoot = root.replace(/[\\/]+$/, '') || separator;
+  const relative = [directory, filename].map((part) => part.replace(/[\\/]+/g, separator)
+    .replace(new RegExp(`^${separator === '\\' ? '\\\\' : '/'}`), '')
+    .replace(/[\\/]+$/, '')).filter(Boolean).join(separator);
+  return normalizedRoot === separator ? `${separator}${relative}` : `${normalizedRoot}${separator}${relative}`;
+}
+
+const COPILOT_LOGIN_STAGE_NOTICES: Record<CopilotRuntimeErrorStage, string> = {
+  sidecar_load: 'Prism could not load its GitHub Copilot runtime. Update or reinstall Prism, then restart Obsidian.',
+  cli_discovery: 'Could not find or start a compatible Copilot CLI. Install it, add it to PATH, restart Obsidian if it is not on PATH, then click Check CLI login again.',
+  workspace: 'Prism could not prepare the temporary GitHub Copilot workspace. Check that local temporary storage is available, then try again.',
+  cli_start: 'Prism found a Copilot CLI but could not start its SDK connection. Check the CLI installation and restart Obsidian, then try again.',
+  auth_status: 'Copilot CLI started, but Prism could not read its login status. Update the GitHub Copilot CLI, then check again.',
+  identity: 'No GitHub.com Copilot CLI OAuth login was found. Run copilot login in a terminal, then check again.',
+  cleanup: 'Prism could not finish cleaning up GitHub Copilot CLI resources. Restart Obsidian, then try again.',
+};
+
+function copilotLoginFailureNotice(error: unknown): string {
+  // Copilot errors can cross the runtime sidecar/test VM boundary, so use the
+  // diagnostic name and a fixed own-property whitelist instead of instanceof.
+  if (error && typeof error === 'object' &&
+      (error as { name?: unknown }).name === 'CopilotLLMProviderError') {
+    const stage = (error as { stage?: unknown }).stage;
+    if (typeof stage === 'string' && Object.prototype.hasOwnProperty.call(COPILOT_LOGIN_STAGE_NOTICES, stage)) {
+      return COPILOT_LOGIN_STAGE_NOTICES[stage as CopilotRuntimeErrorStage];
+    }
+  }
+  if (error instanceof LLMProviderError && error.code === 'authentication') {
+    return COPILOT_LOGIN_STAGE_NOTICES.identity;
+  }
+  if (error instanceof LLMProviderError && error.code === 'invalid_request') {
+    return COPILOT_LOGIN_STAGE_NOTICES.cli_discovery;
+  }
+  return 'Prism could not check the GitHub Copilot CLI login. Verify the CLI installation and login, then try again.';
+}
 
 export default class PrismPlugin extends Plugin {
   settings: PluginSettings = loadSettings(null);
@@ -38,6 +79,13 @@ export default class PrismPlugin extends Plugin {
   private chatOpening?: Promise<void>;
   private codexAuth?: CodexAuth;
   private codexPrompt?: DevicePrompt;
+  private copilotProviders = new Set<CopilotLLMProvider>();
+  private copilotModels: CopilotModelInfo[] = [];
+  private copilotModelState: 'idle' | 'loading' | 'ready' | 'error' = 'idle';
+  private copilotModelError?: string;
+  private copilotModelLoad?: Promise<void>;
+  private copilotGeneration = 0;
+  private copilotRuntime?: CopilotSdkRuntime;
   private prismSettingTab?: PrismSettingTab;
   private localModel?: LocalEmbeddingModel;
   private localEmbeddings?: LocalEmbeddingProvider;
@@ -49,16 +97,22 @@ export default class PrismPlugin extends Plugin {
     this.savedData = typeof loaded === 'object' && loaded !== null && !Array.isArray(loaded)
       ? loaded as Record<string, unknown> : {};
     this.settings = loadSettings(this.savedData);
+    clearLegacyCopilotCredential(this.app.secretStorage);
     const legacySettings = ['allowRemoteEmbeddingIndexing', 'embeddingModel']
       .some((key) => Object.prototype.hasOwnProperty.call(this.savedData, key)) || this.savedData.searchMode === 'openai';
     const obsoleteVectors = (this.savedData.vectorIndex != null || this.savedData.vectorIndexModel != null) &&
       this.savedData.vectorIndexModel !== LOCAL_MODEL_KEY;
+    const obsoleteCopilotSettings = [
+      'copilotClientId', 'copilotCredential', 'copilotAccessToken', 'copilotRefreshToken', 'copilotCliPath',
+    ].some((key) => Object.prototype.hasOwnProperty.call(this.savedData, key)) ||
+      (this.savedData.copilotAccount !== undefined && this.savedData.copilotAccount !== null && !this.settings.copilotAccount);
     if (this.app.secretStorage.getSecret('prism-embedding-api-key')) {
       this.app.secretStorage.setSecret('prism-embedding-api-key', '');
     }
-    if (legacySettings || obsoleteVectors) {
+    if (legacySettings || obsoleteVectors || obsoleteCopilotSettings) {
       await this.savePluginData({ searchMode: this.settings.searchMode,
-        ...(obsoleteVectors ? { vectorIndex: null, vectorIndexModel: null } : {}) });
+        ...(obsoleteVectors ? { vectorIndex: null, vectorIndexModel: null } : {}),
+        ...(obsoleteCopilotSettings ? { copilotAccount: this.settings.copilotAccount ?? null } : {}) });
     }
     if (this.manifest.dir && this.app.vault.adapter) {
       this.localModel = new LocalEmbeddingModel(this.app.vault.adapter, this.manifest.dir);
@@ -181,6 +235,18 @@ export default class PrismPlugin extends Plugin {
           if (!this.codexAuth) throw new Error('ChatGPT connection is not ready.');
           return new CodexLLMProvider(this.codexAuth, this.settings.codexModel).generate(request);
         }
+        if (this.settings.llmConnection === 'github-copilot') {
+          if (!Platform.isDesktopApp) throw new LLMProviderError('unavailable');
+          if (!this.settings.copilotAccount) throw new LLMProviderError('authentication');
+          await this.requireCopilotModel();
+          const provider = this.createCopilotProvider();
+          this.copilotProviders.add(provider);
+          try { return await provider.generate(request); }
+          finally {
+            this.copilotProviders.delete(provider);
+            await provider.dispose();
+          }
+        }
         const key = this.app.secretStorage.getSecret('prism-llm-api-key');
         if (!key || !this.settings.llmModel.trim()) {
           throw new Error('Configure an LLM model and API key before asking Prism.');
@@ -235,7 +301,159 @@ export default class PrismPlugin extends Plugin {
     this.localModel?.cancel();
     this.localEmbeddings?.dispose();
     this.codexAuth?.cancelPending();
+    this.invalidateCopilotOperations();
     this.prismSettingTab?.invalidateConnectionTest();
+  }
+
+  private createCopilotProvider(modelId = this.settings.copilotModel): CopilotLLMProvider {
+    if (!Platform.isDesktopApp) throw new LLMProviderError('unavailable');
+    const pluginDirectory = this.manifest.dir;
+    const adapter = this.app.vault.adapter;
+    if (!pluginDirectory || !(adapter instanceof FileSystemAdapter)) throw new LLMProviderError('unavailable');
+    const sidecarPath = joinDesktopPath(adapter.getBasePath(), pluginDirectory, 'copilot-sdk-runtime.cjs');
+    return new CopilotLLMProvider({
+      expectedAccount: this.settings.copilotAccount,
+      modelId,
+      sidecarPath,
+      isDesktop: () => Platform.isDesktopApp,
+      onAuthenticationFailure: () => this.forgetCopilotAccount(),
+      ...(this.copilotRuntime ? { runtime: this.copilotRuntime } : {}),
+    });
+  }
+
+  private invalidateCopilotOperations(resetCatalog = true): void {
+    this.copilotGeneration += 1;
+    this.copilotModelLoad = undefined;
+    for (const provider of this.copilotProviders) void provider.dispose();
+    this.copilotProviders.clear();
+    if (resetCatalog) {
+      this.copilotModels = [];
+      this.copilotModelState = 'idle';
+      this.copilotModelError = undefined;
+    }
+  }
+
+  private forgetCopilotAccount(): void {
+    const hadAccount = Boolean(this.settings.copilotAccount);
+    this.settings = { ...this.settings, copilotAccount: undefined };
+    this.invalidateCopilotOperations();
+    this.prismSettingTab?.invalidateConnectionTest();
+    if (hadAccount) {
+      void this.savePluginData({ copilotAccount: null }).catch(() => {
+        new Notice('Prism could not save the GitHub Copilot disconnection.');
+      });
+    }
+    this.refreshSettingTab();
+  }
+
+  getCopilotStatus(): {
+    account?: CopilotAccount;
+    models: readonly CopilotModelInfo[];
+    modelState: 'idle' | 'loading' | 'ready' | 'error';
+    modelError?: string;
+  } {
+    return { account: this.settings.copilotAccount,
+      models: this.copilotModels, modelState: this.copilotModelState, modelError: this.copilotModelError };
+  }
+
+  async refreshCopilotModels(force = true): Promise<void> {
+    if (!Platform.isDesktopApp) throw new LLMProviderError('unavailable');
+    if (!this.settings.copilotAccount) throw new LLMProviderError('authentication');
+    if (this.copilotModelState === 'loading' && this.copilotModelLoad) return this.copilotModelLoad;
+    if (!force && this.copilotModelState === 'ready') return;
+
+    const generation = this.copilotGeneration;
+    this.copilotModelState = 'loading';
+    this.copilotModelError = undefined;
+    const provider = this.createCopilotProvider('');
+    this.copilotProviders.add(provider);
+    const load = provider.listModels().then((models) => {
+      if (generation !== this.copilotGeneration) return;
+      this.copilotModels = models.filter((model) => model.id.trim() && model.name.trim() && model.policy?.state !== 'disabled');
+      this.copilotModelState = 'ready';
+    }, (error: unknown) => {
+      if (generation === this.copilotGeneration) {
+        this.copilotModelState = 'error';
+        this.copilotModelError = error instanceof LLMProviderError
+          ? `Could not load available GitHub Copilot models (${error.code}).`
+          : 'Could not load available GitHub Copilot models.';
+      }
+      throw error;
+    }).finally(async () => {
+      this.copilotProviders.delete(provider);
+      await provider.dispose();
+      if (this.copilotModelLoad === load) this.copilotModelLoad = undefined;
+    });
+    this.copilotModelLoad = load;
+    return load;
+  }
+
+  private async requireCopilotModel(): Promise<void> {
+    if (!this.settings.copilotModel.trim()) throw new LLMProviderError('invalid_request');
+    if (this.copilotModelState !== 'ready') await this.refreshCopilotModels(false);
+    if (!this.copilotModels.some((model) => model.id === this.settings.copilotModel && model.policy?.state !== 'disabled')) {
+      throw new LLMProviderError('invalid_request');
+    }
+  }
+
+  async checkCopilotLogin(): Promise<void> {
+    if (!Platform.isDesktopApp) throw new LLMProviderError('unavailable');
+    this.settings = { ...this.settings, copilotAccount: undefined };
+    this.invalidateCopilotOperations();
+    this.prismSettingTab?.invalidateConnectionTest();
+    await this.savePluginData({ copilotAccount: null });
+    const generation = this.copilotGeneration;
+    const provider = this.createCopilotProvider('');
+    this.copilotProviders.add(provider);
+    try {
+      const account = await provider.checkAuth();
+      if (generation !== this.copilotGeneration) return;
+      await this.savePluginData({ copilotAccount: account });
+      if (generation !== this.copilotGeneration) return;
+      this.settings = { ...this.settings, copilotAccount: account };
+      this.invalidateCopilotOperations();
+      this.prismSettingTab?.invalidateConnectionTest();
+      const connectedGeneration = this.copilotGeneration;
+      try { await this.refreshCopilotModels(true); }
+      catch {
+        if (connectedGeneration !== this.copilotGeneration || !this.settings.copilotAccount) return;
+        new Notice('GitHub Copilot CLI is connected to Prism, but its models could not be loaded.');
+      }
+      if (connectedGeneration !== this.copilotGeneration || !this.settings.copilotAccount) return;
+      new Notice(`GitHub account ${account.login} connected to Prism.`);
+      this.refreshSettingTab();
+    } finally {
+      this.copilotProviders.delete(provider);
+      await provider.dispose();
+      this.refreshSettingTab();
+    }
+  }
+
+  async disconnectCopilot(): Promise<void> {
+    this.settings = { ...this.settings, copilotAccount: undefined };
+    this.invalidateCopilotOperations();
+    this.prismSettingTab?.invalidateConnectionTest();
+    await this.savePluginData({ copilotAccount: null });
+    this.refreshSettingTab();
+  }
+
+  async testCopilotConnection(): Promise<void> {
+    if (this.settings.llmConnection !== 'github-copilot') throw new LLMProviderError('invalid_request');
+    if (!Platform.isDesktopApp) throw new LLMProviderError('unavailable');
+    if (!this.settings.copilotAccount) throw new LLMProviderError('authentication');
+    await this.requireCopilotModel();
+    const provider = this.createCopilotProvider();
+    this.copilotProviders.add(provider);
+    try {
+      const response = await provider.generate({
+        messages: [{ role: 'user', content: 'Reply with OK.' }],
+        context: [],
+      });
+      if (response.incompleteReason) throw new LLMProviderError('unknown');
+    } finally {
+      this.copilotProviders.delete(provider);
+      await provider.dispose();
+    }
   }
 
   getCodexStatus(): { accountId?: string; prompt?: DevicePrompt; models: readonly string[]; modelState: 'idle' | 'loading' | 'ready' | 'error'; modelError?: string } {
@@ -449,8 +667,11 @@ export default class PrismPlugin extends Plugin {
     this.settings = { ...this.settings, llmModel };
   }
 
-  async setLlmConnection(value: 'api-key' | 'chatgpt-codex'): Promise<void> {
+  async setLlmConnection(value: PluginSettings['llmConnection']): Promise<void> {
+    if (!['api-key', 'chatgpt-codex', 'github-copilot'].includes(value)) throw new Error('Unknown LLM connection.');
+    if (value === 'github-copilot' && !Platform.isDesktopApp) throw new LLMProviderError('unavailable');
     await this.savePluginData({ llmConnection: value });
+    if (this.settings.llmConnection !== value) this.invalidateCopilotOperations();
     this.settings = { ...this.settings, llmConnection: value };
   }
 
@@ -458,6 +679,15 @@ export default class PrismPlugin extends Plugin {
     const codexModel = value.trim();
     await this.savePluginData({ codexModel });
     this.settings = { ...this.settings, codexModel };
+  }
+
+  async setCopilotModel(value: string): Promise<void> {
+    const copilotModel = value.trim();
+    if (copilotModel === this.settings.copilotModel) return;
+    await this.savePluginData({ copilotModel });
+    this.settings = { ...this.settings, copilotModel };
+    this.invalidateCopilotOperations(false);
+    this.prismSettingTab?.invalidateConnectionTest();
   }
 
   setLlmApiKey(value: string): void {
@@ -473,6 +703,11 @@ export default class PrismPlugin extends Plugin {
       const updated = { ...this.savedData, ...changes };
       delete updated.allowRemoteEmbeddingIndexing;
       delete updated.embeddingModel;
+      delete updated.copilotClientId;
+      delete updated.copilotCredential;
+      delete updated.copilotAccessToken;
+      delete updated.copilotRefreshToken;
+      delete updated.copilotCliPath;
       await this.saveData(updated);
       this.savedData = updated;
     });
@@ -510,6 +745,20 @@ class PrismSettingTab extends PluginSettingTab {
         accountId === this.prism.getCodexStatus().accountId) this.display();
   }
 
+  private async loadCopilotModels(force: boolean): Promise<void> {
+    const account = this.prism.getCopilotStatus().account;
+    const accountKey = account ? `${account.host}/${account.login.toLowerCase()}` : undefined;
+    if (!accountKey || this.prism.getCopilotStatus().modelState === 'loading') return;
+    const loading = this.prism.refreshCopilotModels(force);
+    this.display();
+    try { await loading; } catch { /* The catalog stores a safe error for the settings UI. */ }
+    const currentAccount = this.prism.getCopilotStatus().account;
+    if (this.visible && this.prism.settings.llmConnection === 'github-copilot' &&
+        accountKey === (currentAccount ? `${currentAccount.host}/${currentAccount.login.toLowerCase()}` : undefined)) {
+      this.display();
+    }
+  }
+
   display(): void {
     this.visible = true;
     const { containerEl } = this;
@@ -537,7 +786,7 @@ class PrismSettingTab extends PluginSettingTab {
     }
 
     containerEl.createEl('p', {
-      text: 'Remote processing: Search indexing and query embeddings run on this device. For answers, your selected OpenAI connection receives your query, up to 6 recent question/answer pairs (12,000 UTF-8 bytes), plus retrieved source IDs, chunk IDs, and text. API-key answers go to https://api.openai.com/v1/responses; ChatGPT (Codex) answers go to https://chatgpt.com/backend-api/codex/responses. This data leaves your Vault for those requests.',
+      text: 'Remote processing: Search indexing and query embeddings run on this device. For answers, your selected provider receives your query, up to 6 recent question/answer pairs (12,000 UTF-8 bytes), plus retrieved source IDs, chunk IDs, and text. OpenAI API-key answers go to api.openai.com; ChatGPT (Codex) answers go to chatgpt.com; GitHub Copilot uses the official Copilot SDK and your installed CLI. This data leaves your Vault for those requests.',
     });
 
     new Setting(containerEl)
@@ -575,22 +824,35 @@ class PrismSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName('LLM connection')
       .setDesc('Choose which account pays for answers. Prism never switches connections after an error.')
-      .addDropdown((dropdown) => dropdown
-        .addOption('api-key', 'OpenAI API key')
-        .addOption('chatgpt-codex', 'ChatGPT (Codex, experimental)')
-        .setValue(this.prism.settings.llmConnection)
-        .onChange(async (value) => {
+      .addDropdown((dropdown) => {
+        dropdown.addOption('api-key', 'OpenAI API key')
+          .addOption('chatgpt-codex', 'ChatGPT (Codex, experimental)');
+        if (Platform.isDesktopApp || this.prism.settings.llmConnection === 'github-copilot') {
+          dropdown.addOption('github-copilot', Platform.isDesktopApp
+            ? 'GitHub Copilot (Desktop)' : 'GitHub Copilot (Desktop only)');
+        }
+        dropdown.setValue(this.prism.settings.llmConnection).onChange(async (value) => {
           try {
-            await this.prism.setLlmConnection(value as 'api-key' | 'chatgpt-codex');
+            await this.prism.setLlmConnection(value as PluginSettings['llmConnection']);
             this.invalidateConnectionTest();
             this.display();
-          } catch { new Notice('Prism could not change the LLM connection.'); }
-        }));
+          } catch {
+            this.display();
+            new Notice('Prism could not change the LLM connection on this device.');
+          }
+        });
+      });
 
     const codexModels = this.prism.getCodexStatus().models;
+    const copilotStatus = this.prism.getCopilotStatus();
+    const copilotModels = copilotStatus.models;
+    const connection = this.prism.settings.llmConnection;
     const modelSetting = new Setting(containerEl)
-      .setName(this.prism.settings.llmConnection === 'api-key' ? 'LLM model' : 'Codex model')
-      .setDesc(this.prism.settings.llmConnection === 'api-key' ? 'OpenAI model ID used for answers.'
+      .setName(connection === 'api-key' ? 'LLM model' : connection === 'chatgpt-codex' ? 'Codex model' : 'Copilot model')
+      .setDesc(connection === 'api-key' ? 'OpenAI model ID used for answers.'
+        : connection === 'github-copilot' ? copilotModels.length
+          ? 'Select a model returned by the official Copilot SDK. A saved model must remain listed for Ask to use it.'
+          : `The model list loads after connecting. Use Refresh models to retry; the saved model is retained. ${copilotStatus.modelError ?? ''}`
         : codexModels.length ? 'Select a model returned for this account. Test the connection to verify access.'
           : 'The model list loads when connected. Use Refresh models to retry; your saved model is retained.');
     if (this.prism.settings.llmConnection === 'chatgpt-codex') {
@@ -606,7 +868,20 @@ class PrismSettingTab extends PluginSettingTab {
           } catch { new Notice('Prism could not save the model. Try again.'); }
         });
       });
-    } else {
+    } else if (connection === 'github-copilot' && Platform.isDesktopApp) {
+      const selected = this.prism.settings.copilotModel;
+      modelSetting.addDropdown((dropdown) => {
+        if (!selected) dropdown.addOption('', copilotModels.length ? 'Choose a model' : 'No models available');
+        if (selected && !copilotModels.some((model) => model.id === selected)) dropdown.addOption(selected, `${selected} (saved model)`);
+        for (const model of copilotModels) dropdown.addOption(model.id, model.name);
+        dropdown.setValue(selected).onChange(async (value) => {
+          try {
+            await this.prism.setCopilotModel(value);
+            this.invalidateConnectionTest();
+          } catch { new Notice('Prism could not save the model. Try again.'); }
+        });
+      });
+    } else if (connection === 'api-key') {
       modelSetting.addText((text) => text
         .setPlaceholder('Model ID')
         .setValue(this.prism.settings.llmModel)
@@ -617,7 +892,90 @@ class PrismSettingTab extends PluginSettingTab {
         }));
     }
 
-    if (this.prism.settings.llmConnection === 'chatgpt-codex') {
+    if (connection === 'github-copilot') {
+      if (!Platform.isDesktopApp) {
+        containerEl.createEl('p', {
+          text: 'GitHub Copilot is available on Obsidian Desktop only. On this device, Prism will not load the Copilot runtime or send requests; choose OpenAI API key or ChatGPT (Codex) to use an available connection.',
+        });
+      } else {
+        containerEl.createEl('p', {
+          text: 'GitHub Copilot uses the official SDK and a Copilot CLI executable you install. Run copilot login in a terminal and complete GitHub sign-in. Prism only accepts the stored GitHub.com Copilot CLI OAuth login; it does not use environment tokens, GitHub CLI authentication, or provider API keys. Prism stores only the verified host and login. Ask sends your question, recent conversation and retrieved Vault text to GitHub Copilot. The fixed connection test sends only “Reply with OK.” and no Vault content.',
+        });
+        const { account, modelState, modelError } = copilotStatus;
+        new Setting(containerEl)
+          .setName('GitHub account')
+          .setDesc(account ? `Connected to Prism as ${account.login} (${account.host}).`
+            : 'No GitHub Copilot CLI account is connected to Prism. Run copilot login in a terminal, then check again.')
+          .addButton((button) => button.setButtonText('Check CLI login')
+            .onClick(async () => {
+              try { await this.prism.checkCopilotLogin(); this.display(); }
+              catch (error) { new Notice(copilotLoginFailureNotice(error)); }
+            }))
+          .addButton((button) => button.setButtonText('Disconnect Prism')
+            .setDisabled(!account)
+            .onClick(async () => {
+              this.invalidateConnectionTest();
+              try { await this.prism.disconnectCopilot(); this.display(); }
+              catch { new Notice('Prism could not save the GitHub Copilot disconnection.'); }
+            }));
+        if (account) {
+          new Setting(containerEl).setName('Copilot models')
+            .setDesc(`The official SDK checks your saved GitHub.com CLI identity before loading model names. No Vault content or prompt is sent for this list. ${modelState === 'loading' ? 'Loading models...' : modelError ?? ''}`)
+            .addButton((button) => button.setButtonText(modelState === 'loading' ? 'Loading models...' : 'Refresh models')
+              .setDisabled(modelState === 'loading')
+              .onClick(() => this.loadCopilotModels(true)));
+          if (modelState === 'idle' && !copilotModels.length) {
+            void Promise.resolve().then(() => {
+              if (this.visible && this.prism.settings.llmConnection === 'github-copilot' &&
+                  this.prism.getCopilotStatus().modelState === 'idle') return this.loadCopilotModels(false);
+            });
+          }
+        }
+        new Setting(containerEl)
+          .setName('Test GitHub Copilot connection')
+          .setDesc(account
+            ? 'Sends only “Reply with OK.” to GitHub Copilot using the selected model. No Vault content or chat history is sent.'
+            : 'Check the GitHub Copilot CLI login before testing the connection.')
+          .addButton((button) => button.setButtonText(this.activeConnectionTest ? 'Testing...' : 'Test connection')
+            .setDisabled(!account || !this.prism.settings.copilotModel.trim() || Boolean(this.activeConnectionTest))
+            .onClick(async () => {
+              if (this.activeConnectionTest || !this.prism.getCopilotStatus().account) return;
+              const run = {};
+              this.activeConnectionTest = run;
+              this.connectionTestResult = undefined;
+              this.display();
+              let result: string;
+              try {
+                await this.prism.testCopilotConnection();
+                result = 'Success: GitHub Copilot responded to the connection test.';
+              } catch (error) {
+                const reason = error instanceof LLMProviderError
+                  ? ({ authentication: 'The CLI login changed or is unavailable. Run copilot login in a terminal, then click Check CLI login.',
+                      rate_limit: 'The account is rate limited. Try again later.',
+                      usage_limit: 'The account is rate limited or has reached its quota.',
+                      quota: 'The account has reached its usage quota.',
+                      context_limit: 'The request exceeds the model context limit.',
+                      unavailable: 'The Copilot service, CLI or network is unavailable. Verify the CLI installation and login, then try again.',
+                      invalid_request: 'The selected model or account was rejected, or the CLI could not be started. Install a compatible CLI, add it to PATH, and restart Obsidian if it is not on PATH.',
+                      unknown: 'The Copilot response was incomplete or invalid.' }[error.code])
+                  : 'Connection test could not run. Check the selected model and try again.';
+                result = `Failed: ${reason}`;
+              }
+              if (this.activeConnectionTest !== run ||
+                  this.prism.settings.llmConnection !== 'github-copilot') return;
+              this.activeConnectionTest = undefined;
+              this.connectionTestResult = result;
+              new Notice(result);
+              this.display();
+            }));
+        if (this.connectionTestResult) {
+          const result = containerEl.createEl('p', { text: this.connectionTestResult });
+          result.setAttr('role', 'status');
+        }
+      }
+    }
+
+    if (connection === 'chatgpt-codex') {
       containerEl.createEl('p', { text: 'Experimental Codex compatibility uses a ChatGPT account with Codex access. It uses an interface that can change. Device authorization contacts https://auth.openai.com. You may need to enable device-code sign-in in ChatGPT settings.' });
       const { accountId, prompt, modelState, modelError } = this.prism.getCodexStatus();
       new Setting(containerEl)

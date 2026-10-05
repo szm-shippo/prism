@@ -281,7 +281,8 @@ function visibleText(element) {
   return element.textContent + element.children.map(visibleText).join('');
 }
 
-async function loadPlugin(savedData, failSave = false, storedSecrets = new Map(), responseOverride) {
+async function loadPlugin(savedData, failSave = false, storedSecrets = new Map(), responseOverride,
+  isDesktopApp = true) {
   const manifest = JSON.parse(await readFile(new URL('../manifest.json', import.meta.url), 'utf8'));
   const bundle = await readFile(new URL('../main.js', import.meta.url), 'utf8');
   const module = { exports: {} };
@@ -300,6 +301,10 @@ async function loadPlugin(savedData, failSave = false, storedSecrets = new Map()
 
   const rootSplit = {};
   const rightSplit = { collapsed: true };
+
+  class MockFileSystemAdapter {
+    getBasePath() { return 'C:\\test-vault'; }
+  }
 
   class MockLeaf {
     constructor(root = rootSplit) { this.root = root; }
@@ -351,7 +356,9 @@ async function loadPlugin(savedData, failSave = false, storedSecrets = new Map()
     }, secretStorage: {
       setSecret(id, value) { storedSecrets.set(id, value); },
       getSecret(id) { return storedSecrets.get(id) ?? null; },
-    }, vault: {
+      }, vault: {
+      configDir: '.obsidian',
+      adapter: new MockFileSystemAdapter(),
       files: [],
       getMarkdownFiles() { return this.files; },
       getAbstractFileByPath(path) { return this.files.find((file) => file.path === path) ?? null; },
@@ -427,6 +434,7 @@ async function loadPlugin(savedData, failSave = false, storedSecrets = new Map()
         getValue() { return this.value; },
         onChange(handler) { this.change = handler; return this; },
         commit() { return listeners.get('change')?.(); },
+        blur() { return listeners.get('blur')?.(); },
       };
       callback(text);
       this.text = text;
@@ -459,11 +467,18 @@ async function loadPlugin(savedData, failSave = false, storedSecrets = new Map()
   runInNewContext(bundle, {
     crypto: webcrypto,
     TextEncoder,
+    AbortController,
+    URL,
+    URLSearchParams,
+    setTimeout,
+    clearTimeout,
     module,
     exports: module.exports,
     require(specifier) {
       assert.equal(specifier, 'obsidian');
       return {
+        FileSystemAdapter: MockFileSystemAdapter,
+        Platform: { isDesktopApp },
         Plugin: MockPlugin,
         ItemView: MockItemView,
         PluginSettingTab: MockPluginSettingTab,
@@ -1665,4 +1680,455 @@ test('disconnected Codex model is a dropdown even with no saved selection', asyn
   assert.equal(model.dropdown.options.get(''), 'No models available');
   await new Promise(setImmediate);
   assert.equal(requests.length, 0);
+});
+
+
+function createCopilotRuntime({ account, authErrorFactory = () => new Error('CLI authentication failed'),
+  models = [{ id: 'copilot-model-fixture', name: 'Copilot Fixture' }] } = {}) {
+  let currentAccount = account;
+  let authFailure;
+  let generateFailure;
+  let response = { content: 'Copilot fixture response' };
+  const calls = { getAuthStatus: [], listModels: [], generate: [], logout: 0 };
+  let runtime;
+
+  const sameIdentity = (actual, expected) => actual?.host === 'github.com' && expected?.host === 'github.com' &&
+    typeof actual.login === 'string' && typeof expected.login === 'string' &&
+    actual.login.trim().toLowerCase() === expected.login.trim().toLowerCase();
+
+  const requireExpectedIdentity = async (request) => {
+    const actual = await runtime.getAuthStatus({ signal: request.signal });
+    if (!sameIdentity(actual, request.expectedAccount)) throw authErrorFactory();
+  };
+
+  runtime = {
+    async getAuthStatus(request) {
+      calls.getAuthStatus.push(request);
+      if (authFailure) throw authFailure;
+      if (!currentAccount) throw authErrorFactory();
+      return structuredClone(currentAccount);
+    },
+    async listModels(request) {
+      calls.listModels.push(request);
+      await requireExpectedIdentity(request);
+      return structuredClone(models);
+    },
+    async generate(request) {
+      calls.generate.push(request);
+      await requireExpectedIdentity(request);
+      if (generateFailure) throw generateFailure;
+      return structuredClone(response);
+    },
+    async logout() { calls.logout += 1; },
+  };
+
+  return {
+    runtime,
+    calls,
+    setAccount(value) { currentAccount = value; },
+    setAuthFailure(value) { authFailure = value; },
+    setGenerateFailure(value) { generateFailure = value; },
+    setResponse(value) { response = value; },
+  };
+}
+
+async function getCopilotAuthenticationErrorConstructor(plugin) {
+  let ErrorConstructor;
+  await assert.rejects(plugin.testCopilotConnection(), (error) => {
+    assert.equal(error.code, 'authentication');
+    ErrorConstructor = error.constructor;
+    return true;
+  });
+  return ErrorConstructor;
+}
+
+test('legacy Copilot registration settings and credential migrate to identity-only storage', async () => {
+  const secrets = new Map([
+    ['prism-copilot-credential', JSON.stringify({ clientId: 'legacy-client-fixture',
+      accessToken: 'legacy-access-token-fixture', refreshToken: 'legacy-refresh-token-fixture' })],
+    ['prism-llm-api-key', 'preserved-openai-key-fixture'],
+    ['prism-codex-credential', 'preserved-codex-credential-fixture'],
+  ]);
+  const saved = {
+    llmConnection: 'github-copilot',
+    copilotClientId: 'legacy-client-fixture',
+    copilotCredential: 'legacy-credential-fixture',
+    copilotAccessToken: 'legacy-access-token-fixture',
+    copilotRefreshToken: 'legacy-refresh-token-fixture',
+    copilotAccount: { id: '73', login: 'legacy-user' },
+    copilotModel: 'copilot-model-fixture',
+  };
+  const { plugin, writes, requests, storedSecrets } = await loadPlugin(saved, false, secrets);
+
+  assert.equal(plugin.settings.copilotAccount, undefined);
+  assert.equal(plugin.settings.copilotClientId, undefined);
+  assert.equal(storedSecrets.get('prism-copilot-credential'), '');
+  assert.equal(storedSecrets.get('prism-llm-api-key'), 'preserved-openai-key-fixture');
+  assert.equal(storedSecrets.get('prism-codex-credential'), 'preserved-codex-credential-fixture');
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0].copilotAccount, null);
+  for (const key of ['copilotClientId', 'copilotCredential', 'copilotAccessToken', 'copilotRefreshToken']) {
+    assert.equal(Object.hasOwn(writes[0], key), false);
+  }
+  assert.doesNotMatch(JSON.stringify(writes), /legacy-access-token-fixture|legacy-refresh-token-fixture/);
+  assert.equal(requests.length, 0);
+});
+
+test('legacy Copilot token-only settings migrate even without a client ID', async () => {
+  const saved = {
+    copilotAccessToken: 'legacy-access-token-only-fixture',
+    copilotRefreshToken: 'legacy-refresh-token-only-fixture',
+  };
+  const { plugin, writes, requests } = await loadPlugin(saved);
+
+  assert.equal(plugin.settings.copilotAccount, undefined);
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0].copilotAccount, null);
+  assert.equal(Object.hasOwn(writes[0], 'copilotAccessToken'), false);
+  assert.equal(Object.hasOwn(writes[0], 'copilotRefreshToken'), false);
+  assert.equal(Object.hasOwn(writes[0], 'copilotClientId'), false);
+  assert.equal(requests.length, 0);
+});
+
+test('legacy Copilot CLI path is removed while the valid account and other settings persist', async () => {
+  const account = { host: 'github.com', login: 'saved-user' };
+  const { plugin, writes, requests } = await loadPlugin({
+    llmConnection: 'github-copilot',
+    copilotAccount: account,
+    copilotModel: 'copilot-model-fixture',
+    copilotCliPath: 'C:\\Tools\\copilot.exe',
+    llmModel: 'preserved-model-fixture',
+  });
+
+  assert.equal(Object.hasOwn(plugin.settings, 'copilotCliPath'), false);
+  assert.equal(JSON.stringify(plugin.settings.copilotAccount), JSON.stringify(account));
+  assert.equal(plugin.settings.copilotModel, 'copilot-model-fixture');
+  assert.equal(plugin.settings.llmModel, 'preserved-model-fixture');
+  assert.equal(writes.length, 1);
+  assert.equal(Object.hasOwn(writes[0], 'copilotCliPath'), false);
+  assert.equal(JSON.stringify(writes[0].copilotAccount), JSON.stringify(account));
+  assert.equal(writes[0].copilotModel, 'copilot-model-fixture');
+  assert.equal(writes[0].llmModel, 'preserved-model-fixture');
+  assert.equal(requests.length, 0);
+});
+
+test('Check CLI login explains how to install a CLI that cannot be auto-detected', async () => {
+  const { plugin, tabs, notices, requests } = await loadPlugin({ llmConnection: 'github-copilot' });
+  plugin.manifest.dir = '.obsidian/plugins/prism';
+  const ErrorConstructor = await getCopilotAuthenticationErrorConstructor(plugin);
+  const harness = createCopilotRuntime({ account: { host: 'github.com', login: 'cli-user' },
+    authErrorFactory: () => new ErrorConstructor('authentication') });
+  harness.setAuthFailure(new ErrorConstructor('invalid_request'));
+  plugin.copilotRuntime = harness.runtime;
+
+  tabs[0].display();
+  const settings = tabs[0].containerEl.children;
+  const accountSetting = settings.find((item) => item.name === 'GitHub account');
+  const checkButton = accountSetting.buttons.find((button) => button.label === 'Check CLI login');
+
+  assert.equal(Object.hasOwn(plugin.settings, 'copilotCliPath'), false);
+  assert.equal(settings.some((item) => item.name === 'GitHub Copilot CLI path (optional)'), false);
+  assert.equal(checkButton.disabled ?? false, false);
+  await checkButton.click();
+
+  assert.equal(notices.at(-1), 'Could not find or start a compatible Copilot CLI. Install it, add it to PATH, restart Obsidian if it is not on PATH, then click Check CLI login again.');
+  assert.equal(harness.calls.getAuthStatus.length, 1);
+  assert.equal(Object.hasOwn(harness.calls.getAuthStatus[0], 'cliPath'), false);
+  assert.equal(harness.calls.listModels.length, 0);
+  assert.equal(harness.calls.generate.length, 0);
+  assert.equal(requests.length, 0);
+  assert.equal(plugin.getCopilotStatus().account, undefined);
+});
+
+test('Check CLI login shows fixed stage guidance without exposing runtime details', async () => {
+  const expectedNotices = {
+    sidecar_load: 'Prism could not load its GitHub Copilot runtime. Update or reinstall Prism, then restart Obsidian.',
+    cli_discovery: 'Could not find or start a compatible Copilot CLI. Install it, add it to PATH, restart Obsidian if it is not on PATH, then click Check CLI login again.',
+    workspace: 'Prism could not prepare the temporary GitHub Copilot workspace. Check that local temporary storage is available, then try again.',
+    cli_start: 'Prism found a Copilot CLI but could not start its SDK connection. Check the CLI installation and restart Obsidian, then try again.',
+    auth_status: 'Copilot CLI started, but Prism could not read its login status. Update the GitHub Copilot CLI, then check again.',
+    identity: 'No GitHub.com Copilot CLI OAuth login was found. Run copilot login in a terminal, then check again.',
+    cleanup: 'Prism could not finish cleaning up GitHub Copilot CLI resources. Restart Obsidian, then try again.',
+  };
+  const codes = {
+    sidecar_load: 'unavailable', cli_discovery: 'invalid_request', workspace: 'unavailable',
+    cli_start: 'unknown', auth_status: 'unknown', identity: 'authentication', cleanup: 'unavailable',
+  };
+
+  for (const [stage, expectedNotice] of Object.entries(expectedNotices)) {
+    const { plugin, tabs, notices, requests } = await loadPlugin({ llmConnection: 'github-copilot' });
+    plugin.manifest.dir = '.obsidian/plugins/prism';
+    const harness = createCopilotRuntime({ account: { host: 'github.com', login: 'cli-user' } });
+    const error = new Error('private runtime stderr token and executable path');
+    error.name = 'CopilotRuntimeError';
+    error.code = codes[stage];
+    error.stage = stage;
+    harness.setAuthFailure(error);
+    plugin.copilotRuntime = harness.runtime;
+
+    tabs[0].display();
+    const accountSetting = tabs[0].containerEl.children.find((item) => item.name === 'GitHub account');
+    await accountSetting.buttons.find((button) => button.label === 'Check CLI login').click();
+
+    assert.equal(notices.at(-1), expectedNotice);
+    assert.doesNotMatch(notices.at(-1), /private|stderr|token|executable path/);
+    assert.equal(harness.calls.getAuthStatus.length, 1);
+    assert.equal(harness.calls.listModels.length, 0);
+    assert.equal(harness.calls.generate.length, 0);
+    assert.equal(requests.length, 0);
+  }
+
+  const { plugin, tabs, notices } = await loadPlugin({ llmConnection: 'github-copilot' });
+  plugin.manifest.dir = '.obsidian/plugins/prism';
+  const malformedHarness = createCopilotRuntime({ account: { host: 'github.com', login: 'cli-user' } });
+  const malformedError = new Error('private diagnostic path');
+  malformedError.name = 'CopilotRuntimeError';
+  malformedError.code = 'unavailable';
+  malformedError.stage = 'C:\\private\\diagnostic';
+  malformedHarness.setAuthFailure(malformedError);
+  plugin.copilotRuntime = malformedHarness.runtime;
+  tabs[0].display();
+  const malformedSetting = tabs[0].containerEl.children.find((item) => item.name === 'GitHub account');
+  await malformedSetting.buttons.find((button) => button.label === 'Check CLI login').click();
+  assert.equal(notices.at(-1), 'Prism could not check the GitHub Copilot CLI login. Verify the CLI installation and login, then try again.');
+  assert.doesNotMatch(notices.at(-1), /private|diagnostic/);
+});
+
+test('pathless Check CLI login and Copilot model/test actions work', async () => {
+  const account = { host: 'github.com', login: 'cli-user' };
+  const { plugin, tabs, writes, notices, requests } = await loadPlugin({
+    llmConnection: 'github-copilot',
+    copilotModel: 'copilot-model-fixture',
+  });
+  plugin.manifest.dir = '.obsidian/plugins/prism';
+  const harness = createCopilotRuntime({ account });
+  plugin.copilotRuntime = harness.runtime;
+
+  tabs[0].display();
+  const initialSettings = tabs[0].containerEl.children;
+  const checkButton = initialSettings.find((item) => item.name === 'GitHub account')
+    .buttons.find((button) => button.label === 'Check CLI login');
+  assert.equal(Object.hasOwn(plugin.settings, 'copilotCliPath'), false);
+  assert.equal(initialSettings.some((item) => item.name === 'GitHub Copilot CLI path (optional)'), false);
+  assert.equal(checkButton.disabled ?? false, false);
+  await checkButton.click();
+
+  assert.equal(JSON.stringify(plugin.getCopilotStatus().account), JSON.stringify(account));
+  assert.equal(JSON.stringify(writes.at(-1).copilotAccount), JSON.stringify(account));
+  assert.ok(notices.includes('GitHub account cli-user connected to Prism.'));
+  assert.equal(Object.hasOwn(harness.calls.getAuthStatus[0], 'cliPath'), false);
+  assert.equal(Object.hasOwn(harness.calls.listModels[0], 'cliPath'), false);
+  assert.equal(JSON.stringify(harness.calls.listModels[0].expectedAccount), JSON.stringify(account));
+
+  const settings = tabs[0].containerEl.children;
+  const modelSetting = settings.find((item) => item.name === 'Copilot models');
+  const refreshButton = modelSetting.buttons.find((button) => button.label === 'Refresh models');
+  const testSetting = settings.find((item) => item.name === 'Test GitHub Copilot connection');
+  const testButton = testSetting.buttons.find((button) => button.label === 'Test connection');
+  assert.equal(settings.some((item) => item.name === 'GitHub Copilot CLI path (optional)'), false);
+  assert.equal(refreshButton.disabled ?? false, false);
+  assert.equal(testButton.disabled ?? false, false);
+  await refreshButton.click();
+  await testButton.click();
+
+  assert.equal(harness.calls.listModels.length, 2);
+  assert.equal(harness.calls.generate.length, 1);
+  assert.equal(harness.calls.generate[0].modelId, 'copilot-model-fixture');
+  for (const request of [...harness.calls.getAuthStatus, ...harness.calls.listModels, ...harness.calls.generate]) {
+    assert.equal(Object.hasOwn(request, 'cliPath'), false);
+    assert.equal(Object.hasOwn(request, 'token'), false);
+  }
+  assert.ok(notices.includes('Success: GitHub Copilot responded to the connection test.'));
+  assert.equal(requests.length, 0);
+});
+
+test('Check CLI login stores only verified identity and uses the new account controls', async () => {
+  const account = { host: 'github.com', login: 'cli-user' };
+  const secrets = new Map([
+    ['prism-copilot-credential', 'retired-credential-fixture'],
+    ['prism-llm-api-key', 'preserved-openai-key-fixture'],
+    ['prism-codex-credential', 'preserved-codex-credential-fixture'],
+  ]);
+  const { plugin, tabs, writes, storedSecrets, notices, requests } = await loadPlugin({
+    llmConnection: 'github-copilot',
+    copilotModel: 'copilot-model-fixture',
+  }, false, secrets);
+  plugin.manifest.dir = '.obsidian/plugins/prism';
+  const harness = createCopilotRuntime({ account });
+  plugin.copilotRuntime = harness.runtime;
+
+  tabs[0].display();
+  const accountSetting = tabs[0].containerEl.children.find((item) => item.name === 'GitHub account');
+  assert.ok(accountSetting);
+  assert.deepEqual(accountSetting.buttons.map((button) => button.label), ['Check CLI login', 'Disconnect Prism']);
+  await accountSetting.buttons.find((button) => button.label === 'Check CLI login').click();
+
+  assert.equal(JSON.stringify(plugin.settings.copilotAccount), JSON.stringify(account));
+  assert.equal(JSON.stringify(plugin.getCopilotStatus().account), JSON.stringify(account));
+  assert.deepEqual(writes.at(-1).copilotAccount, account);
+  assert.equal(Object.keys(writes.at(-1).copilotAccount).sort().join(','), 'host,login');
+  assert.equal(Object.hasOwn(harness.calls.getAuthStatus[0], 'cliPath'), false);
+  assert.equal(harness.calls.listModels.length, 1);
+  assert.equal(JSON.stringify(harness.calls.listModels[0].expectedAccount), JSON.stringify(account));
+  for (const request of [...harness.calls.getAuthStatus, ...harness.calls.listModels]) {
+    assert.equal(Object.hasOwn(request, 'token'), false);
+  }
+  assert.equal(storedSecrets.get('prism-copilot-credential'), '');
+  assert.equal(storedSecrets.get('prism-llm-api-key'), 'preserved-openai-key-fixture');
+  assert.equal(storedSecrets.get('prism-codex-credential'), 'preserved-codex-credential-fixture');
+  assert.doesNotMatch(JSON.stringify(writes), /accessToken|refreshToken|copilot-token-fixture/);
+  assert.ok(notices.includes('GitHub account cli-user connected to Prism.'));
+  assert.equal(requests.length, 0);
+});
+
+test('Disconnect Prism clears its catalog without asking the CLI to log out', async () => {
+  const account = { host: 'github.com', login: 'cli-user' };
+  const { plugin, tabs, writes, requests } = await loadPlugin({
+    llmConnection: 'github-copilot',
+    copilotAccount: account,
+    copilotModel: 'copilot-model-fixture',
+  });
+  plugin.manifest.dir = '.obsidian/plugins/prism';
+  const harness = createCopilotRuntime({ account });
+  plugin.copilotRuntime = harness.runtime;
+  await plugin.refreshCopilotModels(true);
+  assert.equal(plugin.getCopilotStatus().models.length, 1);
+
+  tabs[0].display();
+  const accountSetting = tabs[0].containerEl.children.find((item) => item.name === 'GitHub account');
+  const callsBeforeDisconnect = harness.calls.getAuthStatus.length + harness.calls.listModels.length +
+    harness.calls.generate.length;
+  await accountSetting.buttons.find((button) => button.label === 'Disconnect Prism').click();
+
+  assert.equal(plugin.getCopilotStatus().account, undefined);
+  assert.equal(plugin.getCopilotStatus().models.length, 0);
+  assert.equal(writes.at(-1).copilotAccount, null);
+  assert.equal(harness.calls.logout, 0);
+  assert.equal(harness.calls.getAuthStatus.length + harness.calls.listModels.length + harness.calls.generate.length,
+    callsBeforeDisconnect);
+  assert.equal(requests.length, 0);
+});
+
+test('CLI authentication loss and account mismatch clear identity and models, then fail closed', async () => {
+  for (const failureMode of ['authentication-loss', 'account-mismatch']) {
+    const account = { host: 'github.com', login: 'expected-user' };
+    const secrets = new Map([['prism-llm-api-key', 'preserved-openai-key-fixture']]);
+    const { plugin, writes, requests, listeners, MockTFile } = await loadPlugin({
+      llmConnection: 'github-copilot',
+      copilotModel: 'copilot-model-fixture',
+      llmModel: 'fallback-model-fixture',
+    }, false, secrets);
+    plugin.manifest.dir = '.obsidian/plugins/prism';
+    const ErrorConstructor = await getCopilotAuthenticationErrorConstructor(plugin);
+    const harness = createCopilotRuntime({ account, authErrorFactory: () => new ErrorConstructor('authentication') });
+    plugin.copilotRuntime = harness.runtime;
+    await plugin.checkCopilotLogin();
+    assert.equal(plugin.getCopilotStatus().models.length, 1);
+    const file = new MockTFile('authentication.md', '# This must not reach another account. Fail closed after CLI authentication changed.');
+    plugin.app.vault.files = [file];
+    await listeners.get('create')(file);
+
+    if (failureMode === 'authentication-loss') {
+      harness.setAuthFailure(new ErrorConstructor('authentication'));
+      await assert.rejects(plugin.refreshCopilotModels(true), (error) => error.code === 'authentication');
+    } else {
+      harness.setAccount({ host: 'github.com', login: 'different-user' });
+      await assert.rejects(plugin.answerQuery('This must not reach another account.'),
+        (error) => error.code === 'authentication');
+    }
+    await new Promise(setImmediate);
+
+    assert.equal(plugin.getCopilotStatus().account, undefined);
+    assert.equal(plugin.getCopilotStatus().models.length, 0);
+    assert.equal(writes.at(-1).copilotAccount, null);
+    await assert.rejects(plugin.answerQuery('Fail closed after CLI authentication changed.'),
+      (error) => error.code === 'authentication');
+    assert.equal(requests.length, 0);
+    assert.equal(harness.calls.generate.length, failureMode === 'account-mismatch' ? 1 : 0);
+    assert.equal(secrets.get('prism-llm-api-key'), 'preserved-openai-key-fixture');
+  }
+});
+
+test('Copilot remains gated on mobile without loading the runtime or falling back', async () => {
+  const account = { host: 'github.com', login: 'mobile-user' };
+  const secrets = new Map([['prism-llm-api-key', 'preserved-openai-key-fixture']]);
+  const { plugin, tabs, requests, listeners, MockTFile } = await loadPlugin({
+    llmConnection: 'github-copilot',
+    copilotAccount: account,
+    copilotModel: 'copilot-model-fixture',
+    llmModel: 'fallback-model-fixture',
+  }, false, secrets, undefined, false);
+  const harness = createCopilotRuntime({ account });
+  plugin.copilotRuntime = harness.runtime;
+  tabs[0].display();
+  const settings = tabs[0].containerEl.children;
+
+  assert.ok(settings.find((item) => item.name === 'LLM connection').dropdown.options.has('github-copilot'));
+  assert.ok(settings.some((item) => item.tag === 'p' && /Desktop only/.test(item.text)));
+  assert.equal(settings.some((item) => item.name === 'GitHub account'), false);
+  await assert.rejects(plugin.checkCopilotLogin(), (error) => error.code === 'unavailable');
+  await assert.rejects(plugin.refreshCopilotModels(), (error) => error.code === 'unavailable');
+  await assert.rejects(plugin.testCopilotConnection(), (error) => error.code === 'unavailable');
+  await assert.rejects(plugin.setLlmConnection('github-copilot'), (error) => error.code === 'unavailable');
+  const file = new MockTFile('mobile.md', '# Mobile fixture\nMobile fixture');
+  plugin.app.vault.files = [file];
+  await listeners.get('create')(file);
+  await assert.rejects(plugin.answerQuery('Mobile fixture'), (error) => error.code === 'unavailable');
+  assert.equal(JSON.stringify(plugin.settings.copilotAccount), JSON.stringify(account));
+  assert.equal(harness.calls.getAuthStatus.length + harness.calls.listModels.length + harness.calls.generate.length, 0);
+  assert.equal(requests.length, 0);
+  assert.equal(secrets.get('prism-llm-api-key'), 'preserved-openai-key-fixture');
+});
+
+test('Copilot Ask and connection test send the selected model and intended context without fallback', async () => {
+  const account = { host: 'github.com', login: 'copilot-user' };
+  const secrets = new Map([
+    ['prism-llm-api-key', 'preserved-openai-key-fixture'],
+    ['prism-codex-credential', 'preserved-codex-credential-fixture'],
+  ]);
+  const { plugin, tabs, requests, listeners, MockTFile } = await loadPlugin({
+    llmConnection: 'github-copilot',
+    copilotAccount: account,
+    copilotModel: 'copilot-model-fixture',
+    llmModel: 'fallback-model-fixture',
+  }, false, secrets);
+  plugin.manifest.dir = '.obsidian/plugins/prism';
+  const harness = createCopilotRuntime({ account });
+  plugin.copilotRuntime = harness.runtime;
+  await plugin.refreshCopilotModels(true);
+
+  tabs[0].display();
+  const testSetting = tabs[0].containerEl.children.find((item) => item.name === 'Test GitHub Copilot connection');
+  await plugin.testCopilotConnection();
+  const connectionTest = harness.calls.generate.at(-1);
+  assert.equal(connectionTest.modelId, 'copilot-model-fixture');
+  assert.equal(JSON.stringify(connectionTest.expectedAccount), JSON.stringify(account));
+  assert.equal(JSON.stringify(connectionTest.messages), JSON.stringify([{ role: 'user', content: 'Reply with OK.' }]));
+  assert.equal(connectionTest.context.length, 0);
+  assert.equal(Object.hasOwn(connectionTest, 'token'), false);
+  assert.ok(testSetting.description.includes('Reply with OK.'));
+  assert.match(testSetting.description, /No Vault content or chat history is sent/);
+
+  const file = new MockTFile('copilot-fact.md', '# Moonlight\nMoonlight is a local RAG fixture.');
+  plugin.app.vault.files = [file];
+  await listeners.get('create')(file);
+  await plugin.answerQuery('Moonlight', [{ question: 'Earlier question', answer: 'Earlier answer' }]);
+  const ask = harness.calls.generate.at(-1);
+  assert.equal(ask.modelId, 'copilot-model-fixture');
+  assert.equal(JSON.stringify(ask.expectedAccount), JSON.stringify(account));
+  assert.ok(ask.context.some((item) => item.content.includes('Moonlight is a local RAG fixture.')));
+  assert.ok(ask.messages.some((message) => message.content.includes('Earlier question')));
+  for (const request of [...harness.calls.getAuthStatus, ...harness.calls.listModels, ...harness.calls.generate]) {
+    assert.equal(Object.hasOwn(request, 'token'), false);
+  }
+
+  harness.setGenerateFailure(new Error('private SDK response details'));
+  await assert.rejects(plugin.answerQuery('Moonlight'), (error) => {
+    assert.equal(error.code, 'unknown');
+    assert.doesNotMatch(error.message, /private SDK response details/);
+    return true;
+  });
+  assert.equal(requests.length, 0, 'Copilot failures must not fall back to the configured OpenAI API key.');
+  assert.equal(secrets.get('prism-llm-api-key'), 'preserved-openai-key-fixture');
+  assert.equal(secrets.get('prism-codex-credential'), 'preserved-codex-credential-fixture');
 });

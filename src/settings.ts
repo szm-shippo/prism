@@ -4,9 +4,16 @@ export interface PluginSettings {
   searchMode: 'full-text' | 'local';
   showVaultNotice: boolean;
   llmModel: string;
-  llmConnection: 'api-key' | 'chatgpt-codex';
+  llmConnection: 'api-key' | 'chatgpt-codex' | 'github-copilot';
   codexModel: string;
+  copilotAccount?: CopilotAccount;
+  copilotModel: string;
   excludedPaths: string[];
+}
+
+export interface CopilotAccount {
+  host: 'github.com';
+  login: string;
 }
 
 const DEFAULT_SETTINGS: PluginSettings = {
@@ -15,8 +22,17 @@ const DEFAULT_SETTINGS: PluginSettings = {
   llmModel: '',
   llmConnection: 'api-key',
   codexModel: 'gpt-5.4',
+  copilotModel: '',
   excludedPaths: [],
 };
+
+function parseCopilotAccount(value: unknown): CopilotAccount | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
+  const account = value as Record<string, unknown>;
+  const login = typeof account.login === 'string' ? account.login.trim() : '';
+  if (account.host !== 'github.com' || !/^[A-Za-z0-9-]{1,39}$/.test(login)) return undefined;
+  return { host: 'github.com', login };
+}
 
 export function loadSettings(data: unknown): PluginSettings {
   if (typeof data !== 'object' || data === null) {
@@ -36,8 +52,11 @@ export function loadSettings(data: unknown): PluginSettings {
       ? saved.showVaultNotice
       : DEFAULT_SETTINGS.showVaultNotice,
     llmModel: typeof saved.llmModel === 'string' ? saved.llmModel : DEFAULT_SETTINGS.llmModel,
-    llmConnection: saved.llmConnection === 'chatgpt-codex' ? 'chatgpt-codex' : 'api-key',
+    llmConnection: saved.llmConnection === 'chatgpt-codex' || saved.llmConnection === 'github-copilot'
+      ? saved.llmConnection : 'api-key',
     codexModel: typeof saved.codexModel === 'string' ? saved.codexModel : DEFAULT_SETTINGS.codexModel,
+    copilotAccount: parseCopilotAccount(saved.copilotAccount),
+    copilotModel: typeof saved.copilotModel === 'string' ? saved.copilotModel.trim() : '',
     excludedPaths,
   };
 }
