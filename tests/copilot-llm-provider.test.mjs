@@ -35,7 +35,6 @@ const query = {
 function providerWith(runtime, options = {}) {
   const { CopilotLLMProvider } = loadProvider();
   return new CopilotLLMProvider({
-    cliPath: 'C:\\Users\\test\\copilot.exe',
     ...(Object.hasOwn(options, 'expectedAccount') ? { expectedAccount: options.expectedAccount } : { expectedAccount }),
     modelId: options.modelId,
     sidecarPath: 'C:\\plugin\\copilot-sdk-runtime.cjs',
@@ -55,7 +54,7 @@ test('Check CLI login returns only the approved GitHub identity with no supplied
   const provider = providerWith(runtime, { expectedAccount: undefined });
   assert.deepEqual(structuredClone(await provider.checkAuth()), expectedAccount);
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].cliPath, 'C:\\Users\\test\\copilot.exe');
+  assert.equal(Object.hasOwn(calls[0], 'cliPath'), false);
   assert.ok(calls[0].signal instanceof AbortSignal);
   assert.equal(Object.hasOwn(calls[0], 'token'), false);
   await provider.dispose();
@@ -79,7 +78,7 @@ test('model list requires and forwards the stored account identity without crede
   assert.deepEqual(structuredClone(await provider.listModels()), [{ id: 'one', name: 'One' }]);
   assert.equal(calls.length, 1);
   assert.deepEqual(structuredClone(calls[0].expectedAccount), expectedAccount);
-  assert.equal(calls[0].cliPath, 'C:\\Users\\test\\copilot.exe');
+  assert.equal(Object.hasOwn(calls[0], 'cliPath'), false);
   assert.ok(calls[0].signal instanceof AbortSignal);
   assert.equal(Object.hasOwn(calls[0], 'token'), false);
   await assert.rejects(providerWith(runtime, { expectedAccount: undefined }).listModels(),
@@ -109,7 +108,6 @@ test('mobile gate runs before CLI status or sidecar loading', async () => {
   const { CopilotLLMProvider, sidecarLoads } = loadProvider();
   let runtimeCalls = 0;
   const provider = new CopilotLLMProvider({
-    cliPath: 'C:\\Users\\test\\copilot.exe',
     expectedAccount,
     modelId: 'selected',
     sidecarPath: 'C:\\plugin\\copilot-sdk-runtime.cjs',
@@ -129,7 +127,6 @@ test('mobile gate runs before CLI status or sidecar loading', async () => {
 test('sidecar loads lazily only on Desktop and failure hides local path details', async () => {
   const { CopilotLLMProvider, sidecarLoads } = loadProvider();
   const provider = new CopilotLLMProvider({
-    cliPath: 'C:\\Users\\test\\copilot.exe',
     expectedAccount,
     modelId: 'selected',
     sidecarPath: 'C:\\private\\extension\\copilot-sdk-runtime.cjs',

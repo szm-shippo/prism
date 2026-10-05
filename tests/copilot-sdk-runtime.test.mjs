@@ -24,7 +24,6 @@ await build({
 });
 const require = createRequire(import.meta.url);
 const { createCopilotSdkRuntime, resolveCopilotCliPath } = require(runtimeBundlePath);
-const cliPath = process.execPath;
 const expectedAccount = { host: 'github.com', login: 'copilot-user' };
 const messages = [
   { role: 'system', content: 'Use only supplied evidence.' },
@@ -38,6 +37,7 @@ function makeHarness(options = {}) {
   const calls = [];
   let fakeSession;
   const bindings = {
+    resolveCliPath: options.resolveCliPath ?? (async () => process.execPath),
     stdioConnection(path) {
       calls.push(['stdio', path]);
       return { path };
@@ -93,7 +93,6 @@ function makeHarness(options = {}) {
       return client;
     },
   };
-  if (options.resolveCliPath) bindings.resolveCliPath = options.resolveCliPath;
   if (options.afterWorkspaceCreated) bindings.afterWorkspaceCreated = options.afterWorkspaceCreated;
   return { runtime: createCopilotSdkRuntime(bindings), calls, get session() { return fakeSession; } };
 }
@@ -143,6 +142,7 @@ test('SDK model listing rechecks the stored CLI user and strips ambient token an
     github: process.env.GITHUB_TOKEN,
     providerKey: process.env.COPILOT_PROVIDER_API_KEY,
     aws: process.env.AWS_ACCESS_KEY_ID,
+    cliPathOverride: process.env.COPILOT_CLI_PATH,
   };
   process.env.COPILOT_PROVIDER_BASE_URL = 'https://ambient-provider.invalid';
   process.env.COPILOT_PROVIDERS_CONFIG = join(tmpdir(), 'ambient-copilot-providers.json');
@@ -151,13 +151,14 @@ test('SDK model listing rechecks the stored CLI user and strips ambient token an
   process.env.GITHUB_TOKEN = 'ambient-github-token';
   process.env.COPILOT_PROVIDER_API_KEY = 'ambient-provider-key';
   process.env.AWS_ACCESS_KEY_ID = 'ambient-secret';
+  process.env.COPILOT_CLI_PATH = 'C:\\Ambient\\copilot.exe';
   try {
     const checkedProviderRegistries = [];
     const harness = makeHarness({
       async start(config) {
         const fakeCli = "const fs=require('node:fs');const path=process.env.COPILOT_PROVIDERS_CONFIG;" +
           "const registry=JSON.parse(fs.readFileSync(path,'utf8'));" +
-          "process.stdout.write(JSON.stringify({path,registry,userHome:process.env.USERPROFILE||process.env.HOME}));";
+          "process.stdout.write(JSON.stringify({path,registry,userHome:process.env.USERPROFILE||process.env.HOME,cliPath:process.env.COPILOT_CLI_PATH}));";
         const observed = spawnSync(process.execPath, ['-e', fakeCli], {
           cwd: config.workingDirectory, env: config.env, encoding: 'utf8',
         });
@@ -166,11 +167,12 @@ test('SDK model listing rechecks the stored CLI user and strips ambient token an
         assert.equal(childEnvironment.path, config.env.COPILOT_PROVIDERS_CONFIG);
         assert.deepEqual(childEnvironment.registry, { providers: [], models: [] });
         assert.equal(childEnvironment.userHome, config.env.USERPROFILE ?? config.env.HOME);
+        assert.equal(childEnvironment.cliPath, undefined);
         checkedProviderRegistries.push(childEnvironment.path);
       },
     });
-    assert.deepEqual(await harness.runtime.listModels({ cliPath, expectedAccount }), [{ id: 'model-one', name: 'Model One' }]);
-    assert.deepEqual(await harness.runtime.listModels({ cliPath, expectedAccount }), [{ id: 'model-one', name: 'Model One' }]);
+    assert.deepEqual(await harness.runtime.listModels({ expectedAccount }), [{ id: 'model-one', name: 'Model One' }]);
+    assert.deepEqual(await harness.runtime.listModels({ expectedAccount }), [{ id: 'model-one', name: 'Model One' }]);
     const configs = clientOptions(harness.calls);
     assert.equal(configs.length, 2, 'a new SDK client is used to refresh the model catalog');
     for (const config of configs) {
@@ -186,6 +188,7 @@ test('SDK model listing rechecks the stored CLI user and strips ambient token an
       assert.equal(config.env.GITHUB_TOKEN, undefined);
       assert.equal(config.env.COPILOT_PROVIDER_API_KEY, undefined);
       assert.equal(config.env.AWS_ACCESS_KEY_ID, undefined);
+      assert.equal(config.env.COPILOT_CLI_PATH, undefined);
       assert.equal(config.env.COPILOT_HOME, undefined);
       assert.equal(config.env.COPILOT_RUNTIME_PROCESS_FILE_LOGGING, undefined);
       for (const name of ['USERPROFILE', 'HOME', 'APPDATA', 'LOCALAPPDATA']) {
@@ -207,6 +210,7 @@ test('SDK model listing rechecks the stored CLI user and strips ambient token an
       GITHUB_TOKEN: original.github,
       COPILOT_PROVIDER_API_KEY: original.providerKey,
       AWS_ACCESS_KEY_ID: original.aws,
+      COPILOT_CLI_PATH: original.cliPathOverride,
     })) {
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;
@@ -216,7 +220,7 @@ test('SDK model listing rechecks the stored CLI user and strips ambient token an
 
 test('explicit CLI login check accepts a stored OAuth user identity and persists no credential', async () => {
   const harness = makeHarness();
-  assert.deepEqual(await harness.runtime.getAuthStatus({ cliPath }), expectedAccount);
+  assert.deepEqual(await harness.runtime.getAuthStatus({}), expectedAccount);
   const config = clientOptions(harness.calls)[0];
   assert.equal(config.mode, 'copilot-cli');
   assert.equal(config.useLoggedInUser, true);
@@ -224,25 +228,6 @@ test('explicit CLI login check accepts a stored OAuth user identity and persists
   assert.equal(Object.hasOwn(config, 'baseDirectory'), false);
   assert.equal(harness.calls.filter(([kind]) => kind === 'getAuthStatus').length, 1);
   assert.equal(harness.calls.some(([kind]) => kind === 'listModels' || kind === 'createSession'), false);
-});
-
-test('explicit CLI path takes precedence and must resolve to an absolute compatible executable', async () => {
-  const manualPath = 'C:\\Manual\\copilot.exe';
-  const automaticPath = 'C:\\Auto\\copilot.exe';
-  const fileSystem = fakeExecutableFileSystem(new Map([
-    [manualPath, { regular: true }],
-    [automaticPath, { regular: true }],
-  ]));
-
-  assert.equal(await resolveCopilotCliPath(manualPath, {
-    platform: 'win32', environment: { Path: 'C:\\Auto' }, fileSystem,
-  }), manualPath);
-  assert.deepEqual(fileSystem.calls.realpath, [manualPath]);
-  assert.deepEqual(fileSystem.calls.access, []);
-
-  await assert.rejects(resolveCopilotCliPath('relative\\copilot.exe', {
-    platform: 'win32', environment: { PATH: 'C:\\Auto' }, fileSystem,
-  }), (error) => errorCode(error) === 'invalid_request');
 });
 
 test('automatic Windows discovery follows PATH order and resolves native executables', async () => {
@@ -254,12 +239,12 @@ test('automatic Windows discovery follows PATH order and resolves native executa
     [secondPath, { regular: true }],
   ]), new Map([[firstPath, firstTarget]]));
   const harness = makeHarness({
-    resolveCliPath: (path) => resolveCopilotCliPath(path, {
+    resolveCliPath: () => resolveCopilotCliPath({
       platform: 'win32', environment: { PATH: 'C:\\First;C:\\Second' }, fileSystem,
     }),
   });
 
-  assert.deepEqual(await harness.runtime.getAuthStatus({ cliPath: '' }), expectedAccount);
+  assert.deepEqual(await harness.runtime.getAuthStatus({}), expectedAccount);
   assert.deepEqual(harness.calls.find(([kind]) => kind === 'stdio'), ['stdio', firstTarget]);
   assert.deepEqual(fileSystem.calls.realpath, [firstPath]);
 });
@@ -270,7 +255,7 @@ test('Windows discovery checks the WinGet link when PATH is stale and rejects sc
   const wingetFs = fakeExecutableFileSystem(new Map([[installedExe, { regular: true }]]),
     new Map([[wingetLink, installedExe]]));
 
-  assert.equal(await resolveCopilotCliPath('', {
+  assert.equal(await resolveCopilotCliPath({
     platform: 'win32',
     environment: { PATH: 'C:\\Stale', LOCALAPPDATA: 'C:\\Users\\test\\AppData\\Local' },
     fileSystem: wingetFs,
@@ -284,13 +269,10 @@ test('Windows discovery checks the WinGet link when PATH is stale and rejects sc
     [shimTarget, { regular: true }],
     [nativePath, { regular: true }],
   ]), new Map([[shimLink, shimTarget]]));
-  assert.equal(await resolveCopilotCliPath('', {
+  assert.equal(await resolveCopilotCliPath({
     platform: 'win32', environment: { PATH: 'C:\\Npm;C:\\Native' }, fileSystem: shimFs,
   }), nativePath);
   assert.deepEqual(shimFs.calls.realpath, [shimLink, nativePath]);
-  await assert.rejects(resolveCopilotCliPath('C:\\Npm\\copilot.cmd', {
-    platform: 'win32', environment: { PATH: 'C:\\Native' }, fileSystem: shimFs,
-  }), (error) => errorCode(error) === 'invalid_request');
 });
 
 test('Unix discovery skips non-executable files and checks supported install fallbacks', async () => {
@@ -306,24 +288,21 @@ test('Unix discovery skips non-executable files and checks supported install fal
     ['/opt/homebrew/bin/copilot', '/opt/homebrew/Cellar/copilot/current/bin/copilot'],
   ]));
 
-  assert.equal(await resolveCopilotCliPath('', {
+  assert.equal(await resolveCopilotCliPath({
     platform: 'linux', environment: { PATH: '/first:/second' }, fileSystem: unixFs,
   }), '/actual/copilot');
   assert.deepEqual(unixFs.calls.access.slice(0, 2), [
     ['/first/copilot', constants.X_OK], ['/actual/copilot', constants.X_OK],
   ]);
   assert.deepEqual(unixFs.calls.realpath.slice(0, 2), ['/first/copilot', '/second/copilot']);
-  await assert.rejects(resolveCopilotCliPath('/npm/copilot.JS', {
-    platform: 'linux', environment: { PATH: '/actual' }, fileSystem: unixFs,
-  }), (error) => errorCode(error) === 'invalid_request');
-  await assert.rejects(resolveCopilotCliPath('', {
+  await assert.rejects(resolveCopilotCliPath({
     platform: 'linux', environment: { PATH: '/npm/bin' }, fileSystem: unixFs,
   }), (error) => errorCode(error) === 'invalid_request');
   assert.ok(unixFs.calls.realpath.includes('/npm/bin/copilot'));
-  assert.equal(await resolveCopilotCliPath('', {
+  assert.equal(await resolveCopilotCliPath({
     platform: 'linux', environment: { PATH: '/stale', HOME: '/home/test' }, fileSystem: unixFs,
   }), '/home/test/.local/bin/copilot');
-  assert.equal(await resolveCopilotCliPath('', {
+  assert.equal(await resolveCopilotCliPath({
     platform: 'darwin', environment: { PATH: '/stale' }, fileSystem: unixFs,
   }), '/opt/homebrew/Cellar/copilot/current/bin/copilot');
 });
@@ -331,12 +310,12 @@ test('Unix discovery skips non-executable files and checks supported install fal
 test('missing CLI discovery fails before creating an SDK client or workspace', async () => {
   const fileSystem = fakeExecutableFileSystem(new Map());
   const harness = makeHarness({
-    resolveCliPath: (path) => resolveCopilotCliPath(path, {
+    resolveCliPath: () => resolveCopilotCliPath({
       platform: 'linux', environment: { PATH: '/missing' }, fileSystem,
     }),
   });
 
-  await assert.rejects(harness.runtime.getAuthStatus({ cliPath: '' }),
+  await assert.rejects(harness.runtime.getAuthStatus({}),
     (error) => errorCode(error) === 'invalid_request');
   assert.deepEqual(harness.calls, []);
 });
@@ -355,11 +334,11 @@ test('environment, GitHub CLI, BYOK, wrong-host, empty-login, and changed-user a
   ];
   for (const authStatus of rejectedStatuses) {
     const harness = makeHarness({ authStatus });
-    await assert.rejects(harness.runtime.listModels({ cliPath, expectedAccount }), (error) => {
+    await assert.rejects(harness.runtime.listModels({ expectedAccount }), (error) => {
       assert.equal(errorCode(error), 'authentication');
       return true;
     });
-    await assert.rejects(harness.runtime.generate({ cliPath, expectedAccount, modelId: 'selected', messages, context }), (error) => {
+    await assert.rejects(harness.runtime.generate({ expectedAccount, modelId: 'selected', messages, context }), (error) => {
       assert.equal(errorCode(error), 'authentication');
       return true;
     });
@@ -373,7 +352,7 @@ test('environment, GitHub CLI, BYOK, wrong-host, empty-login, and changed-user a
 
 test('generation sends only selected model, provided conversation and retrieved context, with all tools denied', async () => {
   const harness = makeHarness();
-  const response = await harness.runtime.generate({ cliPath, expectedAccount, modelId: 'copilot-explicit-model', messages, context });
+  const response = await harness.runtime.generate({ expectedAccount, modelId: 'copilot-explicit-model', messages, context });
   assert.deepEqual(response, { content: 'Grounded answer' });
   const config = harness.calls.find(([kind]) => kind === 'createSession')[1];
   const send = harness.calls.find(([kind]) => kind === 'sendAndWait');
@@ -425,7 +404,7 @@ test('known SDK error categories become fixed safe errors and no partial answer 
       throw new Error('private response payload and credential');
     },
   });
-  await assert.rejects(harness.runtime.generate({ cliPath, expectedAccount, modelId: 'selected', messages, context }), (error) => {
+  await assert.rejects(harness.runtime.generate({ expectedAccount, modelId: 'selected', messages, context }), (error) => {
     assert.equal(errorCode(error), 'quota');
     assert.doesNotMatch(error.message, /private response|credential/);
     return true;
@@ -440,11 +419,11 @@ test('output-limit finish reason is preserved as incomplete and empty output is 
       return { data: { content: 'Partial answer' } };
     },
   });
-  assert.deepEqual(await limited.runtime.generate({ cliPath, expectedAccount, modelId: 'selected', messages, context }), {
+  assert.deepEqual(await limited.runtime.generate({ expectedAccount, modelId: 'selected', messages, context }), {
     content: 'Partial answer', incompleteReason: 'output_limit',
   });
   const empty = makeHarness({ sendAndWait: async () => ({ data: { content: '  ' } }) });
-  await assert.rejects(empty.runtime.generate({ cliPath, expectedAccount, modelId: 'selected', messages, context }), (error) => {
+  await assert.rejects(empty.runtime.generate({ expectedAccount, modelId: 'selected', messages, context }), (error) => {
     assert.equal(errorCode(error), 'unknown');
     return true;
   });
@@ -452,7 +431,7 @@ test('output-limit finish reason is preserved as incomplete and empty output is 
 
 test('send timeout aborts the session before it is deleted and removed', async () => {
   const harness = makeHarness({ sendAndWait: async () => { throw new Error('Timeout after 60000ms waiting for session.idle'); } });
-  await assert.rejects(harness.runtime.generate({ cliPath, expectedAccount, modelId: 'selected', messages, context }), (error) => {
+  await assert.rejects(harness.runtime.generate({ expectedAccount, modelId: 'selected', messages, context }), (error) => {
     assert.equal(errorCode(error), 'unavailable');
     return true;
   });
@@ -468,7 +447,7 @@ test('abort during SDK startup returns promptly, stops the client and removes it
   const started = new Promise((resolve) => { markStarted = resolve; });
   const harness = makeHarness({ start: async () => { markStarted(); return new Promise(() => {}); } });
   const controller = new AbortController();
-  const pending = harness.runtime.listModels({ cliPath, expectedAccount, signal: controller.signal });
+  const pending = harness.runtime.listModels({ expectedAccount, signal: controller.signal });
   await started;
   controller.abort();
   await assert.rejects(pending, (error) => {
@@ -494,7 +473,7 @@ test('abort while the temporary workspace is being created is handled and cleane
     },
   });
   const controller = new AbortController();
-  const pending = harness.runtime.listModels({ cliPath, expectedAccount, signal: controller.signal });
+  const pending = harness.runtime.listModels({ expectedAccount, signal: controller.signal });
   await workspaceReady;
   controller.abort();
   releaseWorkspace();
@@ -536,10 +515,11 @@ test('SDK stderr forwarding cannot leak a fake CLI sentinel to host stderr', () 
     const probe = spawnSync(cliPath, [...args, '--probe'], { encoding: 'utf8' });
     if (probe.status !== 0 || !probe.stderr.includes('${sentinel}')) process.exit(31);
     const runtime = createCopilotSdkRuntime({
+      resolveCliPath: async () => cliPath,
       stdioConnection: () => ({ kind: 'stdio', path: cliPath, args }),
     });
     const expectedAccount = { host: 'github.com', login: 'copilot-user' };
-    runtime.listModels({ cliPath, expectedAccount }).then(
+    runtime.listModels({ expectedAccount }).then(
       () => process.exit(32),
       () => process.stdout.write('fake-cli-failure-contained'),
     );

@@ -47,7 +47,7 @@ interface RuntimeWorkspace {
 export interface CopilotSdkBindings {
   createClient?: (options: CopilotClientOptions) => RuntimeClient;
   stdioConnection?: (path: string) => CopilotClientOptions['connection'];
-  resolveCliPath?: (configuredPath: string) => Promise<string>;
+  resolveCliPath?: () => Promise<string>;
   afterWorkspaceCreated?: (workspace: RuntimeWorkspace) => Promise<void> | void;
 }
 
@@ -69,7 +69,7 @@ export interface CopilotCliPathResolverOptions {
 const defaultBindings: ResolvedCopilotSdkBindings = {
   createClient: (options) => new CopilotClient(options) as unknown as RuntimeClient,
   stdioConnection: (path) => RuntimeConnection.forStdio({ path }),
-  resolveCliPath: (configuredPath) => resolveCopilotCliPath(configuredPath),
+  resolveCliPath: () => resolveCopilotCliPath(),
 };
 
 export type CopilotModelInfo = Pick<ModelInfo, 'id' | 'name'> & {
@@ -77,7 +77,6 @@ export type CopilotModelInfo = Pick<ModelInfo, 'id' | 'name'> & {
 };
 
 export interface CopilotAuthStatusRequest {
-  cliPath: string;
   signal?: AbortSignal;
 }
 
@@ -171,20 +170,12 @@ async function validatedExecutable(
 }
 
 export async function resolveCopilotCliPath(
-  configuredPath: string,
   options: CopilotCliPathResolverOptions = {},
 ): Promise<string> {
   const platform = options.platform ?? process.platform;
   const environment = options.environment ?? process.env;
   const fileSystem = options.fileSystem ?? { realpath, stat, access };
   const pathApi = platform === 'win32' ? win32 : posix;
-  const explicitPath = configuredPath.trim();
-  if (explicitPath) {
-    const resolved = await validatedExecutable(explicitPath, platform, fileSystem);
-    if (resolved) return resolved;
-    throw new CopilotRuntimeError('invalid_request');
-  }
-
   const executableName = platform === 'win32' ? 'copilot.exe' : 'copilot';
   const pathValue = environmentValue(environment, 'PATH') ?? '';
   const pathSeparator = platform === 'win32' ? ';' : ':';
@@ -422,7 +413,7 @@ async function withClient<T>(
   timeoutMs: number,
   bindings: ResolvedCopilotSdkBindings,
 ): Promise<T> {
-  const cliPath = await bindings.resolveCliPath(request.cliPath);
+  const cliPath = await bindings.resolveCliPath();
   throwIfAborted(request.signal);
   const workspace = await createClientWorkspace();
   try {

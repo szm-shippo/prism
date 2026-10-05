@@ -1697,7 +1697,7 @@ function createCopilotRuntime({ account, authErrorFactory = () => new Error('CLI
     actual.login.trim().toLowerCase() === expected.login.trim().toLowerCase();
 
   const requireExpectedIdentity = async (request) => {
-    const actual = await runtime.getAuthStatus({ cliPath: request.cliPath, signal: request.signal });
+    const actual = await runtime.getAuthStatus({ signal: request.signal });
     if (!sameIdentity(actual, request.expectedAccount)) throw authErrorFactory();
   };
 
@@ -1756,7 +1756,6 @@ test('legacy Copilot registration settings and credential migrate to identity-on
     copilotAccessToken: 'legacy-access-token-fixture',
     copilotRefreshToken: 'legacy-refresh-token-fixture',
     copilotAccount: { id: '73', login: 'legacy-user' },
-    copilotCliPath: 'C:\\Tools\\copilot.exe',
     copilotModel: 'copilot-model-fixture',
   };
   const { plugin, writes, requests, storedSecrets } = await loadPlugin(saved, false, secrets);
@@ -1790,7 +1789,30 @@ test('legacy Copilot token-only settings migrate even without a client ID', asyn
   assert.equal(Object.hasOwn(writes[0], 'copilotClientId'), false);
   assert.equal(requests.length, 0);
 });
-test('Check CLI login explains how to install or override a CLI that auto-detection cannot find', async () => {
+
+test('legacy Copilot CLI path is removed while the valid account and other settings persist', async () => {
+  const account = { host: 'github.com', login: 'saved-user' };
+  const { plugin, writes, requests } = await loadPlugin({
+    llmConnection: 'github-copilot',
+    copilotAccount: account,
+    copilotModel: 'copilot-model-fixture',
+    copilotCliPath: 'C:\\Tools\\copilot.exe',
+    llmModel: 'preserved-model-fixture',
+  });
+
+  assert.equal(Object.hasOwn(plugin.settings, 'copilotCliPath'), false);
+  assert.equal(JSON.stringify(plugin.settings.copilotAccount), JSON.stringify(account));
+  assert.equal(plugin.settings.copilotModel, 'copilot-model-fixture');
+  assert.equal(plugin.settings.llmModel, 'preserved-model-fixture');
+  assert.equal(writes.length, 1);
+  assert.equal(Object.hasOwn(writes[0], 'copilotCliPath'), false);
+  assert.equal(JSON.stringify(writes[0].copilotAccount), JSON.stringify(account));
+  assert.equal(writes[0].copilotModel, 'copilot-model-fixture');
+  assert.equal(writes[0].llmModel, 'preserved-model-fixture');
+  assert.equal(requests.length, 0);
+});
+
+test('Check CLI login explains how to install a CLI that cannot be auto-detected', async () => {
   const { plugin, tabs, notices, requests } = await loadPlugin({ llmConnection: 'github-copilot' });
   plugin.manifest.dir = '.obsidian/plugins/prism';
   const ErrorConstructor = await getCopilotAuthenticationErrorConstructor(plugin);
@@ -1801,27 +1823,24 @@ test('Check CLI login explains how to install or override a CLI that auto-detect
 
   tabs[0].display();
   const settings = tabs[0].containerEl.children;
-  const pathSetting = settings.find((item) => item.name === 'GitHub Copilot CLI path (optional)');
   const accountSetting = settings.find((item) => item.name === 'GitHub account');
   const checkButton = accountSetting.buttons.find((button) => button.label === 'Check CLI login');
 
-  assert.equal(plugin.settings.copilotCliPath, '');
-  assert.match(pathSetting.description, /leave empty for automatic detection from PATH/i);
-  assert.match(pathSetting.description, /absolute path only to override detection/i);
-  assert.match(pathSetting.description, /restart Obsidian/i);
+  assert.equal(Object.hasOwn(plugin.settings, 'copilotCliPath'), false);
+  assert.equal(settings.some((item) => item.name === 'GitHub Copilot CLI path (optional)'), false);
   assert.equal(checkButton.disabled ?? false, false);
   await checkButton.click();
 
-  assert.match(notices.at(-1), /Install it, add it to PATH, restart Obsidian.*set its optional path above/i);
+  assert.equal(notices.at(-1), 'Could not find or start a compatible Copilot CLI. Install it, add it to PATH, restart Obsidian if it is not on PATH, then click Check CLI login again.');
   assert.equal(harness.calls.getAuthStatus.length, 1);
-  assert.equal(harness.calls.getAuthStatus[0].cliPath, '');
+  assert.equal(Object.hasOwn(harness.calls.getAuthStatus[0], 'cliPath'), false);
   assert.equal(harness.calls.listModels.length, 0);
   assert.equal(harness.calls.generate.length, 0);
   assert.equal(requests.length, 0);
   assert.equal(plugin.getCopilotStatus().account, undefined);
 });
 
-test('Check CLI login and Copilot model/test actions work with automatic CLI detection', async () => {
+test('pathless Check CLI login and Copilot model/test actions work', async () => {
   const account = { host: 'github.com', login: 'cli-user' };
   const { plugin, tabs, writes, notices, requests } = await loadPlugin({
     llmConnection: 'github-copilot',
@@ -1833,18 +1852,18 @@ test('Check CLI login and Copilot model/test actions work with automatic CLI det
 
   tabs[0].display();
   const initialSettings = tabs[0].containerEl.children;
-  const pathSetting = initialSettings.find((item) => item.name === 'GitHub Copilot CLI path (optional)');
   const checkButton = initialSettings.find((item) => item.name === 'GitHub account')
     .buttons.find((button) => button.label === 'Check CLI login');
-  assert.equal(plugin.settings.copilotCliPath, '');
+  assert.equal(Object.hasOwn(plugin.settings, 'copilotCliPath'), false);
+  assert.equal(initialSettings.some((item) => item.name === 'GitHub Copilot CLI path (optional)'), false);
   assert.equal(checkButton.disabled ?? false, false);
   await checkButton.click();
 
   assert.equal(JSON.stringify(plugin.getCopilotStatus().account), JSON.stringify(account));
   assert.equal(JSON.stringify(writes.at(-1).copilotAccount), JSON.stringify(account));
   assert.ok(notices.includes('GitHub account cli-user connected to Prism.'));
-  assert.equal(harness.calls.getAuthStatus[0].cliPath, '');
-  assert.equal(harness.calls.listModels[0].cliPath, '');
+  assert.equal(Object.hasOwn(harness.calls.getAuthStatus[0], 'cliPath'), false);
+  assert.equal(Object.hasOwn(harness.calls.listModels[0], 'cliPath'), false);
   assert.equal(JSON.stringify(harness.calls.listModels[0].expectedAccount), JSON.stringify(account));
 
   const settings = tabs[0].containerEl.children;
@@ -1852,7 +1871,7 @@ test('Check CLI login and Copilot model/test actions work with automatic CLI det
   const refreshButton = modelSetting.buttons.find((button) => button.label === 'Refresh models');
   const testSetting = settings.find((item) => item.name === 'Test GitHub Copilot connection');
   const testButton = testSetting.buttons.find((button) => button.label === 'Test connection');
-  assert.ok(pathSetting.description.includes('automatic detection from PATH'));
+  assert.equal(settings.some((item) => item.name === 'GitHub Copilot CLI path (optional)'), false);
   assert.equal(refreshButton.disabled ?? false, false);
   assert.equal(testButton.disabled ?? false, false);
   await refreshButton.click();
@@ -1860,10 +1879,9 @@ test('Check CLI login and Copilot model/test actions work with automatic CLI det
 
   assert.equal(harness.calls.listModels.length, 2);
   assert.equal(harness.calls.generate.length, 1);
-  assert.equal(harness.calls.generate[0].cliPath, '');
   assert.equal(harness.calls.generate[0].modelId, 'copilot-model-fixture');
   for (const request of [...harness.calls.getAuthStatus, ...harness.calls.listModels, ...harness.calls.generate]) {
-    assert.equal(request.cliPath, '');
+    assert.equal(Object.hasOwn(request, 'cliPath'), false);
     assert.equal(Object.hasOwn(request, 'token'), false);
   }
   assert.ok(notices.includes('Success: GitHub Copilot responded to the connection test.'));
@@ -1879,7 +1897,6 @@ test('Check CLI login stores only verified identity and uses the new account con
   ]);
   const { plugin, tabs, writes, storedSecrets, notices, requests } = await loadPlugin({
     llmConnection: 'github-copilot',
-    copilotCliPath: 'C:\\Tools\\copilot.exe',
     copilotModel: 'copilot-model-fixture',
   }, false, secrets);
   plugin.manifest.dir = '.obsidian/plugins/prism';
@@ -1896,7 +1913,7 @@ test('Check CLI login stores only verified identity and uses the new account con
   assert.equal(JSON.stringify(plugin.getCopilotStatus().account), JSON.stringify(account));
   assert.deepEqual(writes.at(-1).copilotAccount, account);
   assert.equal(Object.keys(writes.at(-1).copilotAccount).sort().join(','), 'host,login');
-  assert.equal(harness.calls.getAuthStatus[0].cliPath, 'C:\\Tools\\copilot.exe');
+  assert.equal(Object.hasOwn(harness.calls.getAuthStatus[0], 'cliPath'), false);
   assert.equal(harness.calls.listModels.length, 1);
   assert.equal(JSON.stringify(harness.calls.listModels[0].expectedAccount), JSON.stringify(account));
   for (const request of [...harness.calls.getAuthStatus, ...harness.calls.listModels]) {
@@ -1915,7 +1932,6 @@ test('Disconnect Prism clears its catalog without asking the CLI to log out', as
   const { plugin, tabs, writes, requests } = await loadPlugin({
     llmConnection: 'github-copilot',
     copilotAccount: account,
-    copilotCliPath: 'C:\\Tools\\copilot.exe',
     copilotModel: 'copilot-model-fixture',
   });
   plugin.manifest.dir = '.obsidian/plugins/prism';
@@ -1945,7 +1961,6 @@ test('CLI authentication loss and account mismatch clear identity and models, th
     const secrets = new Map([['prism-llm-api-key', 'preserved-openai-key-fixture']]);
     const { plugin, writes, requests, listeners, MockTFile } = await loadPlugin({
       llmConnection: 'github-copilot',
-      copilotCliPath: 'C:\\Tools\\copilot.exe',
       copilotModel: 'copilot-model-fixture',
       llmModel: 'fallback-model-fixture',
     }, false, secrets);
@@ -1986,7 +2001,6 @@ test('Copilot remains gated on mobile without loading the runtime or falling bac
   const { plugin, tabs, requests, listeners, MockTFile } = await loadPlugin({
     llmConnection: 'github-copilot',
     copilotAccount: account,
-    copilotCliPath: 'C:\\Tools\\copilot.exe',
     copilotModel: 'copilot-model-fixture',
     llmModel: 'fallback-model-fixture',
   }, false, secrets, undefined, false);
@@ -2021,7 +2035,6 @@ test('Copilot Ask and connection test send the selected model and intended conte
   const { plugin, tabs, requests, listeners, MockTFile } = await loadPlugin({
     llmConnection: 'github-copilot',
     copilotAccount: account,
-    copilotCliPath: 'C:\\Tools\\copilot.exe',
     copilotModel: 'copilot-model-fixture',
     llmModel: 'fallback-model-fixture',
   }, false, secrets);

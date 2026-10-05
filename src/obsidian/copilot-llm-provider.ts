@@ -11,7 +11,6 @@ import type {
 } from './copilot-sdk-runtime';
 
 export interface CopilotLLMProviderOptions {
-  cliPath: string;
   expectedAccount?: CopilotAccount;
   modelId?: string;
   sidecarPath: string;
@@ -96,7 +95,7 @@ export class CopilotLLMProvider implements LLMProvider {
       const runtime = await this.getRuntime();
       if (signal.aborted) throw new LLMProviderError('unknown');
       try {
-        const request: CopilotAuthStatusRequest = { cliPath: this.options.cliPath, signal };
+        const request: CopilotAuthStatusRequest = { signal };
         const account = await runtime.getAuthStatus(request);
         if (signal.aborted) throw new LLMProviderError('unknown');
         return account;
@@ -112,7 +111,7 @@ export class CopilotLLMProvider implements LLMProvider {
       if (signal.aborted) throw new LLMProviderError('unknown');
       try {
         const request: CopilotModelListRequest = {
-          cliPath: this.options.cliPath, expectedAccount: this.options.expectedAccount, signal,
+          expectedAccount: this.options.expectedAccount, signal,
         };
         const models = await runtime.listModels(request);
         if (signal.aborted) throw new LLMProviderError('unknown');
@@ -134,7 +133,6 @@ export class CopilotLLMProvider implements LLMProvider {
       if (signal.aborted) throw new LLMProviderError('unknown');
       try {
         const runtimeRequest: CopilotGenerateRequest = {
-          cliPath: this.options.cliPath,
           expectedAccount: this.options.expectedAccount,
           modelId,
           messages: request.messages as readonly LLMMessage[],

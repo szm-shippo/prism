@@ -7,7 +7,6 @@ export interface PluginSettings {
   llmConnection: 'api-key' | 'chatgpt-codex' | 'github-copilot';
   codexModel: string;
   copilotAccount?: CopilotAccount;
-  copilotCliPath: string;
   copilotModel: string;
   excludedPaths: string[];
 }
@@ -23,7 +22,6 @@ const DEFAULT_SETTINGS: PluginSettings = {
   llmModel: '',
   llmConnection: 'api-key',
   codexModel: 'gpt-5.4',
-  copilotCliPath: '',
   copilotModel: '',
   excludedPaths: [],
 };
@@ -58,7 +56,6 @@ export function loadSettings(data: unknown): PluginSettings {
       ? saved.llmConnection : 'api-key',
     codexModel: typeof saved.codexModel === 'string' ? saved.codexModel : DEFAULT_SETTINGS.codexModel,
     copilotAccount: parseCopilotAccount(saved.copilotAccount),
-    copilotCliPath: typeof saved.copilotCliPath === 'string' ? saved.copilotCliPath.trim() : '',
     copilotModel: typeof saved.copilotModel === 'string' ? saved.copilotModel.trim() : '',
     excludedPaths,
   };

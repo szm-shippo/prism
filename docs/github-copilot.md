@@ -18,7 +18,7 @@ copilot login
 
 ローカルの Desktop では通常、ブラウザーが開いてサインインが完了します。GitHub 公式 Copilot CLI の認証を使うため、OAuth App の作成、Client ID の設定、Prism への token の貼り付けは不要です。詳しくは GitHub の [Copilot CLI インストール手順](https://docs.github.com/en/copilot/get-started/cli-quickstart) と[認証手順](https://docs.github.com/en/copilot/how-tos/copilot-cli/set-up-copilot-cli/authenticate-copilot-cli)を参照してください。
 
-Obsidian の Prism 設定で `LLM connection` に `GitHub Copilot (Desktop)` を選び、`Check CLI login` を押します。Prism はまず PATH を探し、見つからなければ OS ごとの限られた標準インストール先を確認して Copilot CLI を自動検出します。通常の設定では executable の path 入力は不要です。Prism はログインと GitHub.com の account も確認します。確認済みの account は `Connected to Prism as <login> (github.com).` と表示されます。続けて `Copilot models` の `Refresh models` で一覧を更新し、model を選んで `Test GitHub Copilot connection` を実行します。
+Obsidian の Prism 設定で `LLM connection` に `GitHub Copilot (Desktop)` を選び、`Check CLI login` を押します。Prism は PATH を探し、見つからなければ OS ごとの限られた標準インストール先を確認して Copilot CLI を自動検出します。Prism はログインと GitHub.com の account も確認します。確認済みの account は `Connected to Prism as <login> (github.com).` と表示されます。続けて `Copilot models` の `Refresh models` で一覧を更新し、model を選んで `Test GitHub Copilot connection` を実行します。
 
 Copilot CLI で使う account を切り替えたら、Prism でもログインを再確認してください。`Disconnect Prism` は Prism の確認済み account と model 一覧を消去しますが、CLI からはログアウトしません。CLI からログアウトする場合は、GitHub 公式 Copilot CLI を確認したうえで CLI を開き、`/logout` を実行します。GitHub の[ログアウト手順](https://docs.github.com/en/copilot/how-tos/copilot-cli/set-up-copilot-cli/authenticate-copilot-cli#signing-out-and-removing-credentials)も参照してください。
 
@@ -47,12 +47,6 @@ SDK 認証の詳細は GitHub の[公式 Copilot SDK 認証ガイド](https://do
 
 ## CLI が自動検出されない場合
 
-インストール後に Prism が CLI を見つけられない場合、まず Obsidian Desktop を終了して再起動し、`Check CLI login` をもう一度押します。Prism は PATH の後に、Windows の WinGet link と macOS / Linux の標準 install directory など、限られた場所だけを確認します。ディスク全体を検索することはありません。
+まず、公式の Copilot CLI がインストールされていることを確認します。インストール後に CLI の PATH が変わった場合は Obsidian Desktop を終了して再起動し、`Check CLI login` をもう一度押してください。Prism は PATH を探し、見つからなければ OS ごとの限られた標準インストール先を確認します。ディスク全体は検索しません。
 
-それでも見つからないときだけ、`GitHub Copilot CLI path (optional)` に absolute path の override を設定します。Windows では、新しい PowerShell を開いて次のコマンドを実行し、表示された path を使います。
-
-```powershell
-(Get-Command copilot.exe).Source
-```
-
-Windows で override に指定できるのは native `copilot.exe` です。`cmd`、PowerShell script、JavaScript、npm shim は指定しないでください。明示した path が無効な場合、Prism は自動検出へ切り替えずエラーを表示します。override を消去すると自動検出に戻ります。
+Windows では新しい PowerShell で `copilot login` を実行できることを確認してください。CLI が見つからない場合は、[Copilot CLI インストール手順](https://docs.github.com/en/copilot/get-started/cli-quickstart)に従ってインストールし、CLI が PATH または標準インストール先から利用できるようにします。その後 Obsidian Desktop を再起動して `Check CLI login` をもう一度押してください。
