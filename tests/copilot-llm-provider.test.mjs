@@ -26,6 +26,7 @@ function loadProvider() {
   return { ...module.exports, sidecarLoads };
 }
 
+const expectedAccount = { host: 'github.com', login: 'copilot-user' };
 const query = {
   messages: [{ role: 'system', content: 'Use the references.' }, { role: 'user', content: 'Question' }],
   context: [{ sourceId: 'source-1', chunkId: 'chunk-1', content: 'Vault evidence' }],
@@ -34,18 +35,36 @@ const query = {
 function providerWith(runtime, options = {}) {
   const { CopilotLLMProvider } = loadProvider();
   return new CopilotLLMProvider({
-    getAccessToken: options.getAccessToken ?? (async () => 'oauth-access-token'),
     cliPath: 'C:\\Users\\test\\copilot.exe',
+    ...(Object.hasOwn(options, 'expectedAccount') ? { expectedAccount: options.expectedAccount } : { expectedAccount }),
     modelId: options.modelId,
     sidecarPath: 'C:\\plugin\\copilot-sdk-runtime.cjs',
     isDesktop: options.isDesktop ?? (() => true),
+    onAuthenticationFailure: options.onAuthenticationFailure,
     runtime,
   });
 }
 
-test('fresh OAuth users can load models before selecting one and disabled entries are filtered', async () => {
+test('Check CLI login returns only the approved GitHub identity with no supplied token', async () => {
   const calls = [];
   const runtime = {
+    async getAuthStatus(request) { calls.push(request); return expectedAccount; },
+    async listModels() { throw new Error('must not list models'); },
+    async generate() { throw new Error('must not generate'); },
+  };
+  const provider = providerWith(runtime, { expectedAccount: undefined });
+  assert.deepEqual(structuredClone(await provider.checkAuth()), expectedAccount);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].cliPath, 'C:\\Users\\test\\copilot.exe');
+  assert.ok(calls[0].signal instanceof AbortSignal);
+  assert.equal(Object.hasOwn(calls[0], 'token'), false);
+  await provider.dispose();
+});
+
+test('model list requires and forwards the stored account identity without credentials', async () => {
+  const calls = [];
+  const runtime = {
+    async getAuthStatus() { return expectedAccount; },
     async listModels(request) {
       calls.push(request);
       return [
@@ -59,86 +78,122 @@ test('fresh OAuth users can load models before selecting one and disabled entrie
   const provider = providerWith(runtime, { modelId: '' });
   assert.deepEqual(structuredClone(await provider.listModels()), [{ id: 'one', name: 'One' }]);
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].token, 'oauth-access-token');
+  assert.deepEqual(structuredClone(calls[0].expectedAccount), expectedAccount);
   assert.equal(calls[0].cliPath, 'C:\\Users\\test\\copilot.exe');
   assert.ok(calls[0].signal instanceof AbortSignal);
-  await assert.rejects(provider.generate(query), (error) => error.code === 'invalid_request');
+  assert.equal(Object.hasOwn(calls[0], 'token'), false);
+  await assert.rejects(providerWith(runtime, { expectedAccount: undefined }).listModels(),
+    (error) => error.code === 'authentication');
+  await provider.dispose();
 });
 
-test('generate forwards the configured model and current messages/context through the desktop runtime', async () => {
+test('generate forwards only the selected model, current messages, context and expected account', async () => {
   const calls = [];
   const runtime = {
+    async getAuthStatus() { return expectedAccount; },
     async listModels() { return []; },
-    async generate(request) {
-      calls.push(request);
-      return { content: 'Answer [cite:chunk-1]' };
-    },
+    async generate(request) { calls.push(request); return { content: 'Answer [cite:chunk-1]' }; },
   };
   const provider = providerWith(runtime, { modelId: 'chosen-copilot-model' });
   assert.deepEqual(structuredClone(await provider.generate(query)), { content: 'Answer [cite:chunk-1]' });
   assert.equal(calls[0].modelId, 'chosen-copilot-model');
   assert.deepEqual(structuredClone(calls[0].messages), query.messages);
   assert.deepEqual(structuredClone(calls[0].context), query.context);
-  assert.equal(calls[0].token, 'oauth-access-token');
+  assert.deepEqual(structuredClone(calls[0].expectedAccount), expectedAccount);
+  assert.equal(Object.hasOwn(calls[0], 'token'), false);
   await provider.dispose();
   await assert.rejects(provider.listModels(), (error) => error.code === 'unavailable');
 });
 
-test('mobile gate runs before token retrieval or sidecar require', async () => {
+test('mobile gate runs before CLI status or sidecar loading', async () => {
   const { CopilotLLMProvider, sidecarLoads } = loadProvider();
-  let tokenReads = 0;
+  let runtimeCalls = 0;
   const provider = new CopilotLLMProvider({
-    getAccessToken: async () => { tokenReads += 1; return 'token'; },
     cliPath: 'C:\\Users\\test\\copilot.exe',
+    expectedAccount,
     modelId: 'selected',
     sidecarPath: 'C:\\plugin\\copilot-sdk-runtime.cjs',
     isDesktop: () => false,
+    runtime: {
+      async getAuthStatus() { runtimeCalls += 1; return expectedAccount; },
+      async listModels() { runtimeCalls += 1; return []; },
+      async generate() { runtimeCalls += 1; return { content: 'unexpected' }; },
+    },
   });
   await assert.rejects(provider.listModels(), (error) => error.code === 'unavailable');
-  assert.equal(tokenReads, 0);
+  await assert.rejects(provider.checkAuth(), (error) => error.code === 'unavailable');
+  assert.equal(runtimeCalls, 0);
   assert.deepEqual(sidecarLoads, []);
 });
 
-test('sidecar loads lazily only after Desktop auth; failure is safe and contains no path or credential', async () => {
+test('sidecar loads lazily only on Desktop and failure hides local path details', async () => {
   const { CopilotLLMProvider, sidecarLoads } = loadProvider();
   const provider = new CopilotLLMProvider({
-    getAccessToken: async () => 'private-token',
     cliPath: 'C:\\Users\\test\\copilot.exe',
+    expectedAccount,
     modelId: 'selected',
     sidecarPath: 'C:\\private\\extension\\copilot-sdk-runtime.cjs',
     isDesktop: () => true,
   });
   await assert.rejects(provider.listModels(), (error) => {
     assert.equal(error.code, 'unavailable');
-    assert.doesNotMatch(error.message, /private-token|private|extension/);
+    assert.doesNotMatch(error.message, /private|extension/);
     return true;
   });
   assert.equal(sidecarLoads.length, 1);
 });
 
-test('cancel settles while OAuth token retrieval is pending and never starts SDK work', async () => {
-  let tokenRead;
-  const tokenPromise = new Promise((resolve) => { tokenRead = resolve; });
-  let sdkCalls = 0;
+test('cancel settles a pending CLI identity check and blocks any later model or prompt work', async () => {
+  let resolveAuth;
+  const authPromise = new Promise((resolve) => { resolveAuth = resolve; });
+  let listCalls = 0;
+  let generateCalls = 0;
   const provider = providerWith({
-    async listModels() { sdkCalls += 1; return []; },
-    async generate() { sdkCalls += 1; return { content: 'unexpected' }; },
-  }, { getAccessToken: () => tokenPromise });
-  const pending = provider.listModels();
+    getAuthStatus: ({ signal }) => Promise.race([
+      authPromise,
+      new Promise((_, reject) => signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true })),
+    ]),
+    async listModels() { listCalls += 1; return []; },
+    async generate() { generateCalls += 1; return { content: 'unexpected' }; },
+  }, { expectedAccount: undefined });
+  const pending = provider.checkAuth();
   await new Promise((resolve) => setImmediate(resolve));
   await provider.cancel();
   await assert.rejects(pending, (error) => error.code === 'unknown');
-  tokenRead('late-token');
-  assert.equal(sdkCalls, 0);
+  resolveAuth(expectedAccount);
+  assert.equal(listCalls, 0);
+  assert.equal(generateCalls, 0);
   await provider.dispose();
 });
 
-test('structured SDK failures map to safe provider categories without leaking details', async () => {
+test('authentication mismatch notifies Prism so it can clear the saved identity and catalog', async () => {
+  let disconnected = 0;
+  const runtime = {
+    async getAuthStatus() { return expectedAccount; },
+    async listModels() {
+      const error = new Error('private auth details');
+      error.name = 'CopilotRuntimeError';
+      error.code = 'authentication';
+      throw error;
+    },
+    async generate() { throw new Error('unused'); },
+  };
+  const provider = providerWith(runtime, { onAuthenticationFailure: () => { disconnected += 1; } });
+  await assert.rejects(provider.listModels(), (error) => {
+    assert.equal(error.code, 'authentication');
+    assert.doesNotMatch(error.message, /private auth/);
+    return true;
+  });
+  assert.equal(disconnected, 1);
+});
+
+test('known SDK failures map to safe provider categories without leaking details', async () => {
   for (const [code, expected] of [
     ['authentication', 'authentication'], ['rate_limit', 'rate_limit'], ['quota', 'quota'],
     ['usage_limit', 'usage_limit'], ['context_limit', 'context_limit'], ['invalid_request', 'invalid_request'],
   ]) {
     const runtime = {
+      async getAuthStatus() { return expectedAccount; },
       async listModels() {
         const error = new Error('private provider details and secret');
         error.name = 'CopilotRuntimeError';
@@ -151,25 +206,6 @@ test('structured SDK failures map to safe provider categories without leaking de
     await assert.rejects(provider.listModels(), (error) => {
       assert.equal(error.code, expected);
       assert.doesNotMatch(error.message, /private provider|secret/);
-      return true;
-    });
-  }
-});
-
-test('typed OAuth refresh failures keep transient categories without exposing response bodies', async () => {
-  for (const code of ['authentication', 'rate_limit', 'unavailable']) {
-    const runtime = { async listModels() { throw new Error('must not start'); }, async generate() { throw new Error('unused'); } };
-    const provider = providerWith(runtime, {
-      getAccessToken: async () => {
-        const error = new Error('private HTTP body and access token');
-        error.name = 'CopilotAuthError';
-        error.code = code;
-        throw error;
-      },
-    });
-    await assert.rejects(provider.listModels(), (error) => {
-      assert.equal(error.code, code);
-      assert.doesNotMatch(error.message, /private HTTP|access token/);
       return true;
     });
   }

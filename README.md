@@ -30,7 +30,7 @@ Issue #72 の対話機能は共通の Obsidian View API・DOM・メモリ内状�
 
 入力欄の上に現在ステータスを表示します。入力待ち、回答待ち、回答完了、失敗を会話のスクロールと独立して確認でき、引用元を開いた結果は別に通知します。入力・コンテキスト上限、出力トークン上限、利用枠、レート制限は、回答サービスが返すコード・終了理由で区別できる場合に表示します。原因を特定できない制限や途中終了は断定しません。途中終了した回答は取得済みの本文と出典を残して未完了と表示し、入力も保持します。未完了・失敗の回答は追質問の成功済み履歴に含めません。質問を短くする、新しい会話を始める、利用状況や設定を確認する、再試行するなどの対処を案内します。
 
-モデル ID と接続の選択はプラグイン設定データ、API キーとアカウント認証情報は Obsidian Secret Storage に保存されます。API キーは保存後に再表示されません。回答生成時には質問、送信対象の過去の質問・回答、取得した source ID・chunk ID・本文が選択した OpenAI API、ChatGPT/Codex、または GitHub Copilot の接続先に送られます。Ask 画面の「Data sent」にも送信範囲を表示します。索引作成・更新・検索質問のベクトル化は端末内で処理し、OpenAI Embeddings API への送信は行いません。検索方式が Local full-text の場合はローカル全文検索、Local Embedding の場合は端末内のベクトル化と全文検索を使います。Advanced ではファイル・フォルダを検索索引から除外できます。
+モデル ID と接続の選択はプラグイン設定データに保存されます。OpenAI API キーと ChatGPT/Codex の認証情報は Obsidian Secret Storage に保存されます。GitHub Copilot では Prism に確認済みの GitHub.com host と login だけを保存し、CLI 認証情報は Copilot CLI の通常のユーザー認証領域で管理します。Prism から切断しても CLI からログアウトしません。旧バージョンが保存した Prism の OAuth secret と Client ID は更新時に消去し、CLI の認証情報には触れません。回答生成時には質問、送信対象の過去の質問・回答、取得した source ID・chunk ID・本文が選択した OpenAI API、ChatGPT/Codex、または GitHub Copilot の接続先に送られます。Ask 画面の「Data sent」にも送信範囲を表示します。索引作成・更新・検索質問のベクトル化は端末内で処理し、OpenAI Embeddings API への送信は行いません。検索方式が Local full-text の場合はローカル全文検索、Local Embedding の場合は端末内のベクトル化と全文検索を使います。Advanced ではファイル・フォルダを検索索引から除外できます。
 
 ## ChatGPT (Codex) 接続
 
@@ -42,7 +42,7 @@ Issue #72 の対話機能は共通の Obsidian View API・DOM・メモリ内状�
 
 ## GitHub Copilot (Desktop)
 
-GitHub Copilot は公式 SDK を使う Obsidian Desktop 専用の接続です。利用者自身の OAuth App Device Flow、CLI 実行ファイルの設定、モデル選択、送信データと端末ごとの Secret Storage については [GitHub Copilot 接続手順](docs/github-copilot.md) を参照してください。iOS と Android ではこの runtime を読み込まず、既存の API キーと Codex 接続を引き続き利用できます。
+GitHub Copilot は公式 SDK を使う Obsidian Desktop 専用の接続です。互換性のある Copilot CLI を利用者がインストールし、端末のターミナルで公式 `copilot login` OAuth による認証を行ってから、Prism の `Check CLI login` で GitHub.com の login を確認します。OAuth App の登録、Client ID、Prism に渡す token は不要です。CLI の準備、モデル選択、送信データについては [GitHub Copilot 接続手順](docs/github-copilot.md) を参照してください。iOS と Android ではこの runtime を読み込まず、既存の API キーと Codex 接続を引き続き利用できます。
 
 ## ローカル Embedding
 

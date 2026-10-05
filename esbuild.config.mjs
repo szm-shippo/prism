@@ -1,6 +1,6 @@
 import esbuild from 'esbuild';
 import { mkdir, copyFile, readFile, writeFile } from 'node:fs/promises';
-import { suppressCopilotCliStderrPlugin } from './scripts/copilot-sdk-stderr-plugin.mjs';
+import { suppressCopilotCliDiagnosticsPlugin } from './scripts/copilot-sdk-stderr-plugin.mjs';
 
 const production = process.argv[2] === 'production';
 const workerContext = await esbuild.context({
@@ -45,7 +45,7 @@ const copilotRuntimeContext = await esbuild.context({
   outfile: 'copilot-sdk-runtime.cjs',
   minify: production,
   logLevel: 'info',
-  plugins: [suppressCopilotCliStderrPlugin()],
+  plugins: [suppressCopilotCliDiagnosticsPlugin()],
 });
 await copilotRuntimeContext.rebuild();
 if (production) await copilotRuntimeContext.dispose();

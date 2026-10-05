@@ -1,6 +1,8 @@
 import { Platform } from 'obsidian';
 import { LLMProviderError, type LLMContext, type LLMMessage, type LLMProvider, type LLMRequest, type LLMResponse } from '../core/provider/llm-provider';
+import type { CopilotAccount } from '../settings';
 import type {
+  CopilotAuthStatusRequest,
   CopilotGenerateRequest,
   CopilotModelInfo,
   CopilotModelListRequest,
@@ -9,22 +11,17 @@ import type {
 } from './copilot-sdk-runtime';
 
 export interface CopilotLLMProviderOptions {
-  getAccessToken: () => Promise<string>;
   cliPath: string;
+  expectedAccount?: CopilotAccount;
   modelId?: string;
   sidecarPath: string;
   isDesktop?: () => boolean;
+  onAuthenticationFailure?: () => void;
   runtime?: CopilotSdkRuntime;
 }
 
 function safeRuntimeError(error: unknown): LLMProviderError {
   if (error instanceof LLMProviderError) return error;
-  if (error instanceof Error && error.name === 'CopilotAuthError') {
-    const code = (error as Error & { code?: unknown }).code;
-    if (code === 'authentication' || code === 'rate_limit' || code === 'unavailable') {
-      return new LLMProviderError(code);
-    }
-  }
   if (error instanceof Error && error.name === 'CopilotRuntimeError') {
     const code = (error as Error & { code?: unknown }).code;
     if (code === 'authentication' || code === 'rate_limit' || code === 'quota' || code === 'usage_limit' ||
@@ -42,6 +39,7 @@ function runtimeFromSidecar(sidecarPath: string): CopilotSdkRuntime {
   if (!loaded || typeof loaded !== 'object') throw new LLMProviderError('unavailable');
   const runtime = (loaded as { copilotSdkRuntime?: unknown }).copilotSdkRuntime;
   if (!runtime || typeof runtime !== 'object' ||
+      typeof (runtime as CopilotSdkRuntime).getAuthStatus !== 'function' ||
       typeof (runtime as CopilotSdkRuntime).listModels !== 'function' ||
       typeof (runtime as CopilotSdkRuntime).generate !== 'function') {
     throw new LLMProviderError('unavailable');
@@ -67,6 +65,12 @@ export class CopilotLLMProvider implements LLMProvider {
     if (!this.isDesktop() || this.disposed) throw new LLMProviderError('unavailable');
   }
 
+  private runtimeError(error: unknown): LLMProviderError {
+    const mapped = safeRuntimeError(error);
+    if (mapped.code === 'authentication') this.options.onAuthenticationFailure?.();
+    return mapped;
+  }
+
   private async getRuntime(): Promise<CopilotSdkRuntime> {
     this.ensureDesktop();
     if (this.runtime) return this.runtime;
@@ -80,33 +84,6 @@ export class CopilotLLMProvider implements LLMProvider {
     }
   }
 
-  private async accessToken(signal: AbortSignal): Promise<string> {
-    if (signal.aborted) throw new LLMProviderError('unknown');
-    let abortHandler: (() => void) | undefined;
-    let token: string;
-    try {
-      token = await Promise.race([
-        this.options.getAccessToken(),
-        new Promise<never>((_resolve, reject) => {
-          abortHandler = () => reject(new LLMProviderError('unknown'));
-          signal.addEventListener('abort', abortHandler, { once: true });
-          if (signal.aborted) abortHandler();
-        }),
-      ]);
-    } catch (error) {
-      if (signal.aborted) throw new LLMProviderError('unknown');
-      if (error instanceof LLMProviderError || (error instanceof Error && error.name === 'CopilotAuthError')) {
-        throw safeRuntimeError(error);
-      }
-      throw new LLMProviderError('authentication');
-    } finally {
-      if (abortHandler) signal.removeEventListener('abort', abortHandler);
-    }
-    if (signal.aborted) throw new LLMProviderError('unknown');
-    if (!token.trim()) throw new LLMProviderError('authentication');
-    return token;
-  }
-
   private run<T>(operation: (signal: AbortSignal) => Promise<T>): Promise<T> {
     this.ensureDesktop();
     const controller = new AbortController();
@@ -115,18 +92,33 @@ export class CopilotLLMProvider implements LLMProvider {
     return pending;
   }
 
+  async checkAuth(): Promise<CopilotAccount> {
+    return this.run(async (signal) => {
+      const runtime = await this.getRuntime();
+      if (signal.aborted) throw new LLMProviderError('unknown');
+      try {
+        const request: CopilotAuthStatusRequest = { cliPath: this.options.cliPath, signal };
+        const account = await runtime.getAuthStatus(request);
+        if (signal.aborted) throw new LLMProviderError('unknown');
+        return account;
+      } catch (error) { throw this.runtimeError(error); }
+    });
+  }
+
   async listModels(): Promise<CopilotModelInfo[]> {
     return this.run(async (signal) => {
-      const token = await this.accessToken(signal);
+      if (!this.options.expectedAccount) throw new LLMProviderError('authentication');
       if (signal.aborted) throw new LLMProviderError('unknown');
       const runtime = await this.getRuntime();
       if (signal.aborted) throw new LLMProviderError('unknown');
       try {
-        const request: CopilotModelListRequest = { cliPath: this.options.cliPath, token, signal };
+        const request: CopilotModelListRequest = {
+          cliPath: this.options.cliPath, expectedAccount: this.options.expectedAccount, signal,
+        };
         const models = await runtime.listModels(request);
         if (signal.aborted) throw new LLMProviderError('unknown');
         return models.filter(({ id, name, policy }) => id.trim() && name.trim() && policy?.state !== 'disabled');
-      } catch (error) { throw safeRuntimeError(error); }
+      } catch (error) { throw this.runtimeError(error); }
     });
   }
 
@@ -137,14 +129,14 @@ export class CopilotLLMProvider implements LLMProvider {
     const modelId = this.options.modelId?.trim();
     if (!modelId) throw new LLMProviderError('invalid_request');
     return this.run(async (signal) => {
-      const token = await this.accessToken(signal);
+      if (!this.options.expectedAccount) throw new LLMProviderError('authentication');
       if (signal.aborted) throw new LLMProviderError('unknown');
       const runtime = await this.getRuntime();
       if (signal.aborted) throw new LLMProviderError('unknown');
       try {
         const runtimeRequest: CopilotGenerateRequest = {
           cliPath: this.options.cliPath,
-          token,
+          expectedAccount: this.options.expectedAccount,
           modelId,
           messages: request.messages as readonly LLMMessage[],
           context: request.context as readonly LLMContext[],
@@ -161,7 +153,7 @@ export class CopilotLLMProvider implements LLMProvider {
           throw new LLMProviderError('unknown');
         }
         return response;
-      } catch (error) { throw safeRuntimeError(error); }
+      } catch (error) { throw this.runtimeError(error); }
     });
   }
 

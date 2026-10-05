@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, stat } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, extname, isAbsolute, join, relative, resolve } from 'node:path';
 import {
@@ -9,6 +9,7 @@ import {
   type SessionConfig,
 } from '@github/copilot-sdk';
 import type { LLMContext, LLMMessage, LLMResponse } from '../core/provider/llm-provider';
+import type { CopilotAccount } from '../settings';
 
 interface RuntimeSession {
   sessionId: string;
@@ -22,6 +23,12 @@ interface RuntimeSession {
 
 interface RuntimeClient {
   start(): Promise<void>;
+  getAuthStatus(): Promise<{
+    isAuthenticated: boolean;
+    authType?: string;
+    host?: string;
+    login?: string;
+  }>;
   listModels(): Promise<ModelInfo[]>;
   createSession(config: SessionConfig): Promise<RuntimeSession>;
   deleteSession(sessionId: string): Promise<void>;
@@ -32,7 +39,8 @@ interface RuntimeClient {
 interface RuntimeWorkspace {
   root: string;
   workingDirectory: string;
-  baseDirectory: string;
+  configDirectory: string;
+  providersConfigFile: string;
 }
 
 export interface CopilotSdkBindings {
@@ -53,10 +61,13 @@ export type CopilotModelInfo = Pick<ModelInfo, 'id' | 'name'> & {
   policy?: Pick<NonNullable<ModelInfo['policy']>, 'state'>;
 };
 
-export interface CopilotModelListRequest {
+export interface CopilotAuthStatusRequest {
   cliPath: string;
-  token: string;
   signal?: AbortSignal;
+}
+
+export interface CopilotModelListRequest extends CopilotAuthStatusRequest {
+  expectedAccount: CopilotAccount;
 }
 
 export interface CopilotGenerateRequest extends CopilotModelListRequest {
@@ -66,6 +77,7 @@ export interface CopilotGenerateRequest extends CopilotModelListRequest {
 }
 
 export interface CopilotSdkRuntime {
+  getAuthStatus(request: CopilotAuthStatusRequest): Promise<CopilotAccount>;
   listModels(request: CopilotModelListRequest): Promise<CopilotModelInfo[]>;
   generate(request: CopilotGenerateRequest): Promise<LLMResponse>;
 }
@@ -119,17 +131,49 @@ function runtimeEnvironment(source: NodeJS.ProcessEnv = process.env): Record<str
   return result;
 }
 
-async function validateRequest(cliPath: string, token: string): Promise<void> {
+async function validateRequest(cliPath: string): Promise<void> {
   if (!cliPath.trim() || !isAbsolute(cliPath) || extname(cliPath).toLowerCase() === '.js') {
     throw new CopilotRuntimeError('invalid_request');
   }
-  if (!token.trim()) throw new CopilotRuntimeError('authentication');
   try {
     const file = await stat(cliPath);
     if (!file.isFile()) throw new Error();
   } catch {
     throw new CopilotRuntimeError('invalid_request');
   }
+}
+
+function isGitHubDotComHost(value: unknown): boolean {
+  if (typeof value !== 'string' || !value.trim()) return false;
+  try {
+    const source = value.trim();
+    const url = new URL(source.includes('://') ? source : `https://${source}`);
+    return url.protocol === 'https:' && url.hostname.toLowerCase() === 'github.com' &&
+      (!url.port || url.port === '443') && url.pathname === '/' && !url.search && !url.hash;
+  } catch { return false; }
+}
+
+function copilotUserIdentity(status: unknown): CopilotAccount {
+  if (!status || typeof status !== 'object' || Array.isArray(status)) {
+    throw new CopilotRuntimeError('authentication');
+  }
+  const value = status as Record<string, unknown>;
+  const login = typeof value.login === 'string' ? value.login.trim() : '';
+  if (value.isAuthenticated !== true || value.authType !== 'user' || !isGitHubDotComHost(value.host) ||
+      !/^[A-Za-z0-9-]{1,39}$/.test(login)) {
+    throw new CopilotRuntimeError('authentication');
+  }
+  return { host: 'github.com', login };
+}
+
+function requireExpectedCopilotUser(status: unknown, expectedAccount: CopilotAccount): CopilotAccount {
+  const actual = copilotUserIdentity(status);
+  if (expectedAccount.host !== 'github.com' ||
+      !/^[A-Za-z0-9-]{1,39}$/.test(expectedAccount.login.trim()) ||
+      actual.login.toLowerCase() !== expectedAccount.login.trim().toLowerCase()) {
+    throw new CopilotRuntimeError('authentication');
+  }
+  return actual;
 }
 
 function throwIfAborted(signal?: AbortSignal): void {
@@ -249,21 +293,30 @@ function promptFor(messages: readonly LLMMessage[], context: readonly LLMContext
   ].join('\n\n');
 }
 
-function sessionConfig(request: CopilotGenerateRequest, workingDirectory: string): SessionConfig {
+function sessionConfig(request: CopilotGenerateRequest, workingDirectory: string, configDirectory: string): SessionConfig {
   return {
     model: request.modelId,
     allowedModels: [request.modelId],
     systemMessage: { mode: 'replace', content: systemMessage(request.messages) },
     workingDirectory,
+    configDirectory,
     availableTools: [],
     tools: [],
     customAgents: [],
     includedBuiltinSkills: [],
     skipCustomInstructions: true,
     enableConfigDiscovery: false,
+    skipEmbeddingRetrieval: true,
+    embeddingCacheStorage: 'in-memory',
+    enableOnDemandInstructionDiscovery: false,
     enableFileHooks: false,
     enableHostGitOperations: false,
     enableSessionTelemetry: false,
+    enableSessionStore: false,
+    enableSkills: false,
+    memory: { enabled: false },
+    customAgentsLocalOnly: true,
+    coauthorEnabled: false,
     enableExperimentalMode: false,
     enableMcpApps: false,
     requestCanvasRenderer: false,
@@ -281,9 +334,14 @@ async function createClientWorkspace(): Promise<RuntimeWorkspace> {
   const root = await mkdtemp(join(tmpdir(), 'prism-copilot-'));
   try {
     const workingDirectory = join(root, 'workspace');
-    const baseDirectory = join(root, 'copilot-home');
-    await Promise.all([mkdir(workingDirectory), mkdir(baseDirectory)]);
-    return { root, workingDirectory, baseDirectory };
+    const configDirectory = join(root, 'session-config');
+    const providersConfigFile = join(root, 'providers.json');
+    await Promise.all([
+      mkdir(workingDirectory),
+      mkdir(configDirectory),
+      writeFile(providersConfigFile, JSON.stringify({ providers: [], models: [] }), { encoding: 'utf8', flag: 'wx' }),
+    ]);
+    return { root, workingDirectory, configDirectory, providersConfigFile };
   } catch {
     await quietly(() => removeOwnedWorkspace(root));
     throw new CopilotRuntimeError('unavailable');
@@ -291,12 +349,12 @@ async function createClientWorkspace(): Promise<RuntimeWorkspace> {
 }
 
 async function withClient<T>(
-  request: CopilotModelListRequest,
+  request: CopilotAuthStatusRequest,
   action: (client: RuntimeClient, workspace: RuntimeWorkspace, signal: AbortSignal) => Promise<T>,
   timeoutMs: number,
   bindings: ResolvedCopilotSdkBindings,
 ): Promise<T> {
-  await validateRequest(request.cliPath, request.token);
+  await validateRequest(request.cliPath);
   throwIfAborted(request.signal);
   const workspace = await createClientWorkspace();
   try {
@@ -330,13 +388,14 @@ async function withClient<T>(
     throwIfAborted(controller.signal);
     const options: CopilotClientOptions = {
       connection: bindings.stdioConnection(request.cliPath),
-      mode: 'empty',
+      mode: 'copilot-cli',
       workingDirectory: workspace.workingDirectory,
-      baseDirectory: workspace.baseDirectory,
       logLevel: 'none',
-      env: runtimeEnvironment(),
-      gitHubToken: request.token,
-      useLoggedInUser: false,
+      env: {
+        ...runtimeEnvironment(),
+        COPILOT_PROVIDERS_CONFIG: workspace.providersConfigFile,
+      },
+      useLoggedInUser: true,
     };
     client = bindings.createClient(options);
     throwIfAborted(controller.signal);
@@ -367,9 +426,21 @@ async function withClient<T>(
 export function createCopilotSdkRuntime(overrides: CopilotSdkBindings = {}): CopilotSdkRuntime {
   const bindings: ResolvedCopilotSdkBindings = { ...defaultBindings, ...overrides };
   return {
+    async getAuthStatus(request): Promise<CopilotAccount> {
+      return withClient(request, async (client, _workspace, signal) => {
+        await client.start();
+        throwIfAborted(signal);
+        const status = await client.getAuthStatus();
+        throwIfAborted(signal);
+        return copilotUserIdentity(status);
+      }, MODEL_LIST_TIMEOUT_MS, bindings);
+    },
+
     async listModels(request): Promise<CopilotModelInfo[]> {
       return withClient(request, async (client, _workspace, signal) => {
         await client.start();
+        throwIfAborted(signal);
+        requireExpectedCopilotUser(await client.getAuthStatus(), request.expectedAccount);
         throwIfAborted(signal);
         const models = await client.listModels();
         throwIfAborted(signal);
@@ -399,7 +470,9 @@ export function createCopilotSdkRuntime(overrides: CopilotSdkBindings = {}): Cop
         try {
           await client.start();
           throwIfAborted(signal);
-          session = await client.createSession(sessionConfig(request, workspace.workingDirectory));
+          requireExpectedCopilotUser(await client.getAuthStatus(), request.expectedAccount);
+          throwIfAborted(signal);
+          session = await client.createSession(sessionConfig(request, workspace.workingDirectory, workspace.configDirectory));
           unsubscribeIdle = session.on('session.idle', (event) => {
             if (event.data.aborted) idleAborted = true;
           });
