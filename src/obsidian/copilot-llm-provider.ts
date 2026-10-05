@@ -55,7 +55,6 @@ export class CopilotLLMProvider implements LLMProvider {
   private readonly isDesktop: () => boolean;
 
   constructor(private readonly options: CopilotLLMProviderOptions) {
-    if (!options.cliPath.trim()) throw new Error('Choose the installed GitHub Copilot CLI executable in Prism settings.');
     if (!options.sidecarPath.trim() && !options.runtime) throw new Error('The GitHub Copilot runtime sidecar is unavailable.');
     this.runtime = options.runtime;
     this.isDesktop = options.isDesktop ?? (() => Platform.isDesktopApp);

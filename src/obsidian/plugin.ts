@@ -331,7 +331,6 @@ export default class PrismPlugin extends Plugin {
   async refreshCopilotModels(force = true): Promise<void> {
     if (!Platform.isDesktopApp) throw new LLMProviderError('unavailable');
     if (!this.settings.copilotAccount) throw new LLMProviderError('authentication');
-    if (!this.settings.copilotCliPath.trim()) throw new LLMProviderError('invalid_request');
     if (this.copilotModelState === 'loading' && this.copilotModelLoad) return this.copilotModelLoad;
     if (!force && this.copilotModelState === 'ready') return;
 
@@ -371,7 +370,6 @@ export default class PrismPlugin extends Plugin {
 
   async checkCopilotLogin(): Promise<void> {
     if (!Platform.isDesktopApp) throw new LLMProviderError('unavailable');
-    if (!this.settings.copilotCliPath.trim()) throw new LLMProviderError('invalid_request');
     this.settings = { ...this.settings, copilotAccount: undefined };
     this.invalidateCopilotOperations();
     this.prismSettingTab?.invalidateConnectionTest();
@@ -895,9 +893,9 @@ class PrismSettingTab extends PluginSettingTab {
           text: 'GitHub Copilot uses the official SDK and a Copilot CLI executable you install. Run copilot login in a terminal and complete GitHub sign-in. Prism only accepts the stored GitHub.com Copilot CLI OAuth login; it does not use environment tokens, GitHub CLI authentication, or provider API keys. Prism stores only the verified host and login. Ask sends your question, recent conversation and retrieved Vault text to GitHub Copilot. The fixed connection test sends only “Reply with OK.” and no Vault content.',
         });
         new Setting(containerEl)
-          .setName('GitHub Copilot CLI executable')
-          .setDesc('Set the absolute path to the compatible Copilot CLI executable installed by you, then run copilot login in a terminal. Prism does not download or bundle the CLI.')
-          .addText((text) => text.setPlaceholder('Absolute path to Copilot CLI executable')
+          .setName('GitHub Copilot CLI path (optional)')
+          .setDesc('Leave empty for automatic detection from PATH and supported install locations. Set an absolute path only to override detection. If you installed the CLI while Obsidian was running and it is not on PATH, restart Obsidian or enter the path here.')
+          .addText((text) => text.setPlaceholder('Optional absolute path to Copilot CLI executable')
             .setValue(this.prism.settings.copilotCliPath)
             .onChange((value) => this.queueCopilotSetting(async () => {
               await this.prism.setCopilotCliPath(value);
@@ -909,9 +907,7 @@ class PrismSettingTab extends PluginSettingTab {
         new Setting(containerEl)
           .setName('GitHub account')
           .setDesc(account ? `Connected to Prism as ${account.login} (${account.host}).`
-            : this.prism.settings.copilotCliPath.trim()
-              ? 'No GitHub Copilot CLI account is connected to Prism. Run copilot login in a terminal, then check again.'
-              : 'Set the absolute path to the compatible Copilot CLI executable above, then run copilot login in a terminal and check again.')
+            : 'No GitHub Copilot CLI account is connected to Prism. Run copilot login in a terminal, then check again.')
           .addButton((button) => button.setButtonText('Check CLI login')
             .onClick(async () => {
               try { await this.prism.checkCopilotLogin(); this.display(); }
@@ -919,7 +915,9 @@ class PrismSettingTab extends PluginSettingTab {
                 const message = error instanceof LLMProviderError && error.code === 'authentication'
                   ? 'No GitHub.com Copilot CLI OAuth login was found. Run copilot login in a terminal, then check again.'
                   : error instanceof LLMProviderError && error.code === 'invalid_request'
-                    ? 'Set the absolute path to the compatible GitHub Copilot CLI executable in the field above, then try again.'
+                    ? this.prism.settings.copilotCliPath.trim()
+                      ? 'The configured Copilot CLI path is invalid or not executable. Leave it blank for automatic detection, or set an absolute path to a compatible executable.'
+                      : 'Could not find or start a compatible Copilot CLI. Install it, add it to PATH, restart Obsidian if it is not on PATH, or set its optional path above.'
                     : 'Prism could not check the GitHub Copilot CLI login. Check the CLI path and try again.';
                 new Notice(message);
               }
@@ -935,9 +933,9 @@ class PrismSettingTab extends PluginSettingTab {
           new Setting(containerEl).setName('Copilot models')
             .setDesc(`The official SDK checks your saved GitHub.com CLI identity before loading model names. No Vault content or prompt is sent for this list. ${modelState === 'loading' ? 'Loading models...' : modelError ?? ''}`)
             .addButton((button) => button.setButtonText(modelState === 'loading' ? 'Loading models...' : 'Refresh models')
-              .setDisabled(modelState === 'loading' || !this.prism.settings.copilotCliPath.trim())
+              .setDisabled(modelState === 'loading')
               .onClick(() => this.loadCopilotModels(true)));
-          if (modelState === 'idle' && !copilotModels.length && this.prism.settings.copilotCliPath.trim()) {
+          if (modelState === 'idle' && !copilotModels.length) {
             void Promise.resolve().then(() => {
               if (this.visible && this.prism.settings.llmConnection === 'github-copilot' &&
                   this.prism.getCopilotStatus().modelState === 'idle') return this.loadCopilotModels(false);
@@ -950,8 +948,7 @@ class PrismSettingTab extends PluginSettingTab {
             ? 'Sends only “Reply with OK.” to GitHub Copilot using the selected model. No Vault content or chat history is sent.'
             : 'Check the GitHub Copilot CLI login before testing the connection.')
           .addButton((button) => button.setButtonText(this.activeConnectionTest ? 'Testing...' : 'Test connection')
-            .setDisabled(!account || !this.prism.settings.copilotCliPath.trim() ||
-              !this.prism.settings.copilotModel.trim() || Boolean(this.activeConnectionTest))
+            .setDisabled(!account || !this.prism.settings.copilotModel.trim() || Boolean(this.activeConnectionTest))
             .onClick(async () => {
               if (this.activeConnectionTest || !this.prism.getCopilotStatus().account) return;
               const run = {};
@@ -970,7 +967,9 @@ class PrismSettingTab extends PluginSettingTab {
                       quota: 'The account has reached its usage quota.',
                       context_limit: 'The request exceeds the model context limit.',
                       unavailable: 'The Copilot service, CLI or network is unavailable. Check the CLI path and try again.',
-                      invalid_request: 'The selected model, CLI path or account is not permitted to make this request.',
+                      invalid_request: this.prism.settings.copilotCliPath.trim()
+                        ? 'The selected model, configured CLI path or account is not permitted to make this request.'
+                        : 'The selected model or account was rejected, or the CLI could not be started. Install a compatible CLI, add it to PATH, or set its optional path.',
                       unknown: 'The Copilot response was incomplete or invalid.' }[error.code])
                   : 'Connection test could not run. Check the selected model and try again.';
                 result = `Failed: ${reason}`;

@@ -42,7 +42,7 @@ Issue #72 の対話機能は共通の Obsidian View API・DOM・メモリ内状�
 
 ## GitHub Copilot (Desktop)
 
-GitHub Copilot は公式 SDK を使う Obsidian Desktop 専用の接続です。互換性のある Copilot CLI を利用者がインストールし、端末のターミナルで公式 `copilot login` OAuth による認証を行ってから、Prism の `Check CLI login` で GitHub.com の login を確認します。OAuth App の登録、Client ID、Prism に渡す token は不要です。CLI の準備、モデル選択、送信データについては [GitHub Copilot 接続手順](docs/github-copilot.md) を参照してください。iOS と Android ではこの runtime を読み込まず、既存の API キーと Codex 接続を引き続き利用できます。
+GitHub Copilot は公式 SDK を使う Obsidian Desktop 専用の接続です。互換性のある Copilot CLI を利用者がインストールし、端末のターミナルで公式 `copilot login` OAuth による認証を行ってから、Prism の `Check CLI login` で GitHub.com の login を確認します。Prism は通常 CLI を自動検出するため、path の手動設定は不要です。OAuth App の登録、Client ID、Prism に渡す token も不要です。CLI の準備、model 選択、送信データについては [GitHub Copilot 接続手順](docs/github-copilot.md) を参照してください。iOS と Android ではこの runtime を読み込まず、既存の API キーと Codex 接続を引き続き利用できます。
 
 ## ローカル Embedding
 

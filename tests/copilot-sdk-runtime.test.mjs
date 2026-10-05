@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { constants } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { mkdtemp, readFile, rm, stat, copyFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -22,7 +23,7 @@ await build({
   plugins: [suppressCopilotCliDiagnosticsPlugin()],
 });
 const require = createRequire(import.meta.url);
-const { createCopilotSdkRuntime } = require(runtimeBundlePath);
+const { createCopilotSdkRuntime, resolveCopilotCliPath } = require(runtimeBundlePath);
 const cliPath = process.execPath;
 const expectedAccount = { host: 'github.com', login: 'copilot-user' };
 const messages = [
@@ -92,6 +93,7 @@ function makeHarness(options = {}) {
       return client;
     },
   };
+  if (options.resolveCliPath) bindings.resolveCliPath = options.resolveCliPath;
   if (options.afterWorkspaceCreated) bindings.afterWorkspaceCreated = options.afterWorkspaceCreated;
   return { runtime: createCopilotSdkRuntime(bindings), calls, get session() { return fakeSession; } };
 }
@@ -103,6 +105,31 @@ function clientOptions(calls) {
 function errorCode(error) {
   assert.equal(error.name, 'CopilotRuntimeError');
   return error.code;
+}
+
+function fakeExecutableFileSystem(files, links = new Map()) {
+  const calls = { realpath: [], stat: [], access: [] };
+  return {
+    calls,
+    async realpath(path) {
+      calls.realpath.push(path);
+      const canonicalPath = links.get(path) ?? path;
+      if (!files.has(canonicalPath)) throw Object.assign(new Error('missing fixture'), { code: 'ENOENT' });
+      return canonicalPath;
+    },
+    async stat(path) {
+      calls.stat.push(path);
+      const file = files.get(path);
+      if (!file) throw Object.assign(new Error('missing fixture'), { code: 'ENOENT' });
+      return { isFile: () => file.regular !== false };
+    },
+    async access(path, mode) {
+      calls.access.push([path, mode]);
+      if (mode === constants.X_OK && !files.get(path)?.executable) {
+        throw Object.assign(new Error('not executable fixture'), { code: 'EACCES' });
+      }
+    },
+  };
 }
 
 after(async () => rm(testDirectory, { recursive: true, force: true }));
@@ -197,6 +224,121 @@ test('explicit CLI login check accepts a stored OAuth user identity and persists
   assert.equal(Object.hasOwn(config, 'baseDirectory'), false);
   assert.equal(harness.calls.filter(([kind]) => kind === 'getAuthStatus').length, 1);
   assert.equal(harness.calls.some(([kind]) => kind === 'listModels' || kind === 'createSession'), false);
+});
+
+test('explicit CLI path takes precedence and must resolve to an absolute compatible executable', async () => {
+  const manualPath = 'C:\\Manual\\copilot.exe';
+  const automaticPath = 'C:\\Auto\\copilot.exe';
+  const fileSystem = fakeExecutableFileSystem(new Map([
+    [manualPath, { regular: true }],
+    [automaticPath, { regular: true }],
+  ]));
+
+  assert.equal(await resolveCopilotCliPath(manualPath, {
+    platform: 'win32', environment: { Path: 'C:\\Auto' }, fileSystem,
+  }), manualPath);
+  assert.deepEqual(fileSystem.calls.realpath, [manualPath]);
+  assert.deepEqual(fileSystem.calls.access, []);
+
+  await assert.rejects(resolveCopilotCliPath('relative\\copilot.exe', {
+    platform: 'win32', environment: { PATH: 'C:\\Auto' }, fileSystem,
+  }), (error) => errorCode(error) === 'invalid_request');
+});
+
+test('automatic Windows discovery follows PATH order and resolves native executables', async () => {
+  const firstPath = 'C:\\First\\copilot.exe';
+  const secondPath = 'C:\\Second\\copilot.exe';
+  const firstTarget = 'C:\\Program Files\\GitHub Copilot\\copilot.exe';
+  const fileSystem = fakeExecutableFileSystem(new Map([
+    [firstTarget, { regular: true }],
+    [secondPath, { regular: true }],
+  ]), new Map([[firstPath, firstTarget]]));
+  const harness = makeHarness({
+    resolveCliPath: (path) => resolveCopilotCliPath(path, {
+      platform: 'win32', environment: { PATH: 'C:\\First;C:\\Second' }, fileSystem,
+    }),
+  });
+
+  assert.deepEqual(await harness.runtime.getAuthStatus({ cliPath: '' }), expectedAccount);
+  assert.deepEqual(harness.calls.find(([kind]) => kind === 'stdio'), ['stdio', firstTarget]);
+  assert.deepEqual(fileSystem.calls.realpath, [firstPath]);
+});
+
+test('Windows discovery checks the WinGet link when PATH is stale and rejects script shims', async () => {
+  const wingetLink = 'C:\\Users\\test\\AppData\\Local\\Microsoft\\WinGet\\Links\\copilot.exe';
+  const installedExe = 'C:\\Users\\test\\AppData\\Local\\Microsoft\\WinGet\\Packages\\GitHub.Copilot\\copilot.exe';
+  const wingetFs = fakeExecutableFileSystem(new Map([[installedExe, { regular: true }]]),
+    new Map([[wingetLink, installedExe]]));
+
+  assert.equal(await resolveCopilotCliPath('', {
+    platform: 'win32',
+    environment: { PATH: 'C:\\Stale', LOCALAPPDATA: 'C:\\Users\\test\\AppData\\Local' },
+    fileSystem: wingetFs,
+  }), installedExe);
+  assert.deepEqual(wingetFs.calls.realpath, ['C:\\Stale\\copilot.exe', wingetLink]);
+
+  const shimLink = 'C:\\Npm\\copilot.exe';
+  const shimTarget = 'C:\\Npm\\node_modules\\@github\\copilot\\copilot.cmd';
+  const nativePath = 'C:\\Native\\copilot.exe';
+  const shimFs = fakeExecutableFileSystem(new Map([
+    [shimTarget, { regular: true }],
+    [nativePath, { regular: true }],
+  ]), new Map([[shimLink, shimTarget]]));
+  assert.equal(await resolveCopilotCliPath('', {
+    platform: 'win32', environment: { PATH: 'C:\\Npm;C:\\Native' }, fileSystem: shimFs,
+  }), nativePath);
+  assert.deepEqual(shimFs.calls.realpath, [shimLink, nativePath]);
+  await assert.rejects(resolveCopilotCliPath('C:\\Npm\\copilot.cmd', {
+    platform: 'win32', environment: { PATH: 'C:\\Native' }, fileSystem: shimFs,
+  }), (error) => errorCode(error) === 'invalid_request');
+});
+
+test('Unix discovery skips non-executable files and checks supported install fallbacks', async () => {
+  const unixFs = fakeExecutableFileSystem(new Map([
+    ['/first/copilot', { regular: true, executable: false }],
+    ['/actual/copilot', { regular: true, executable: true }],
+    ['/npm/node_modules/@github/copilot/copilot.js', { regular: true, executable: true }],
+    ['/home/test/.local/bin/copilot', { regular: true, executable: true }],
+    ['/opt/homebrew/Cellar/copilot/current/bin/copilot', { regular: true, executable: true }],
+  ]), new Map([
+    ['/second/copilot', '/actual/copilot'],
+    ['/npm/bin/copilot', '/npm/node_modules/@github/copilot/copilot.js'],
+    ['/opt/homebrew/bin/copilot', '/opt/homebrew/Cellar/copilot/current/bin/copilot'],
+  ]));
+
+  assert.equal(await resolveCopilotCliPath('', {
+    platform: 'linux', environment: { PATH: '/first:/second' }, fileSystem: unixFs,
+  }), '/actual/copilot');
+  assert.deepEqual(unixFs.calls.access.slice(0, 2), [
+    ['/first/copilot', constants.X_OK], ['/actual/copilot', constants.X_OK],
+  ]);
+  assert.deepEqual(unixFs.calls.realpath.slice(0, 2), ['/first/copilot', '/second/copilot']);
+  await assert.rejects(resolveCopilotCliPath('/npm/copilot.JS', {
+    platform: 'linux', environment: { PATH: '/actual' }, fileSystem: unixFs,
+  }), (error) => errorCode(error) === 'invalid_request');
+  await assert.rejects(resolveCopilotCliPath('', {
+    platform: 'linux', environment: { PATH: '/npm/bin' }, fileSystem: unixFs,
+  }), (error) => errorCode(error) === 'invalid_request');
+  assert.ok(unixFs.calls.realpath.includes('/npm/bin/copilot'));
+  assert.equal(await resolveCopilotCliPath('', {
+    platform: 'linux', environment: { PATH: '/stale', HOME: '/home/test' }, fileSystem: unixFs,
+  }), '/home/test/.local/bin/copilot');
+  assert.equal(await resolveCopilotCliPath('', {
+    platform: 'darwin', environment: { PATH: '/stale' }, fileSystem: unixFs,
+  }), '/opt/homebrew/Cellar/copilot/current/bin/copilot');
+});
+
+test('missing CLI discovery fails before creating an SDK client or workspace', async () => {
+  const fileSystem = fakeExecutableFileSystem(new Map());
+  const harness = makeHarness({
+    resolveCliPath: (path) => resolveCopilotCliPath(path, {
+      platform: 'linux', environment: { PATH: '/missing' }, fileSystem,
+    }),
+  });
+
+  await assert.rejects(harness.runtime.getAuthStatus({ cliPath: '' }),
+    (error) => errorCode(error) === 'invalid_request');
+  assert.deepEqual(harness.calls, []);
 });
 
 test('environment, GitHub CLI, BYOK, wrong-host, empty-login, and changed-user auth fail before any request', async () => {

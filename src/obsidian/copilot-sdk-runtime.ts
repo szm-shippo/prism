@@ -1,6 +1,7 @@
-import { mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { access, mkdir, mkdtemp, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { basename, extname, isAbsolute, join, relative, resolve } from 'node:path';
+import { basename, isAbsolute, join, posix, relative, resolve, win32 } from 'node:path';
 import {
   CopilotClient,
   RuntimeConnection,
@@ -46,15 +47,29 @@ interface RuntimeWorkspace {
 export interface CopilotSdkBindings {
   createClient?: (options: CopilotClientOptions) => RuntimeClient;
   stdioConnection?: (path: string) => CopilotClientOptions['connection'];
+  resolveCliPath?: (configuredPath: string) => Promise<string>;
   afterWorkspaceCreated?: (workspace: RuntimeWorkspace) => Promise<void> | void;
 }
 
-type ResolvedCopilotSdkBindings = Required<Pick<CopilotSdkBindings, 'createClient' | 'stdioConnection'>> &
+type ResolvedCopilotSdkBindings = Required<Pick<CopilotSdkBindings, 'createClient' | 'stdioConnection' | 'resolveCliPath'>> &
   Pick<CopilotSdkBindings, 'afterWorkspaceCreated'>;
+
+export interface CopilotCliPathFileSystem {
+  realpath(path: string): Promise<string>;
+  stat(path: string): Promise<{ isFile(): boolean }>;
+  access(path: string, mode?: number): Promise<void>;
+}
+
+export interface CopilotCliPathResolverOptions {
+  platform?: NodeJS.Platform;
+  environment?: NodeJS.ProcessEnv;
+  fileSystem?: CopilotCliPathFileSystem;
+}
 
 const defaultBindings: ResolvedCopilotSdkBindings = {
   createClient: (options) => new CopilotClient(options) as unknown as RuntimeClient,
   stdioConnection: (path) => RuntimeConnection.forStdio({ path }),
+  resolveCliPath: (configuredPath) => resolveCopilotCliPath(configuredPath),
 };
 
 export type CopilotModelInfo = Pick<ModelInfo, 'id' | 'name'> & {
@@ -131,16 +146,69 @@ function runtimeEnvironment(source: NodeJS.ProcessEnv = process.env): Record<str
   return result;
 }
 
-async function validateRequest(cliPath: string): Promise<void> {
-  if (!cliPath.trim() || !isAbsolute(cliPath) || extname(cliPath).toLowerCase() === '.js') {
-    throw new CopilotRuntimeError('invalid_request');
-  }
+function environmentValue(environment: NodeJS.ProcessEnv, name: string): string | undefined {
+  const key = Object.keys(environment).find((candidate) => candidate.toLowerCase() === name.toLowerCase());
+  return key ? environment[key] : undefined;
+}
+
+async function validatedExecutable(
+  candidate: string,
+  platform: NodeJS.Platform,
+  fileSystem: CopilotCliPathFileSystem,
+): Promise<string | undefined> {
+  const pathApi = platform === 'win32' ? win32 : posix;
+  if (!pathApi.isAbsolute(candidate) || pathApi.extname(candidate).toLowerCase() === '.js' ||
+      (platform === 'win32' && pathApi.extname(candidate).toLowerCase() !== '.exe')) return undefined;
   try {
-    const file = await stat(cliPath);
-    if (!file.isFile()) throw new Error();
-  } catch {
+    const canonicalPath = await fileSystem.realpath(candidate);
+    if (!pathApi.isAbsolute(canonicalPath) || pathApi.extname(canonicalPath).toLowerCase() === '.js' ||
+        (platform === 'win32' && pathApi.extname(canonicalPath).toLowerCase() !== '.exe')) return undefined;
+    const file = await fileSystem.stat(canonicalPath);
+    if (!file.isFile()) return undefined;
+    if (platform !== 'win32') await fileSystem.access(canonicalPath, constants.X_OK);
+    return canonicalPath;
+  } catch { return undefined; }
+}
+
+export async function resolveCopilotCliPath(
+  configuredPath: string,
+  options: CopilotCliPathResolverOptions = {},
+): Promise<string> {
+  const platform = options.platform ?? process.platform;
+  const environment = options.environment ?? process.env;
+  const fileSystem = options.fileSystem ?? { realpath, stat, access };
+  const pathApi = platform === 'win32' ? win32 : posix;
+  const explicitPath = configuredPath.trim();
+  if (explicitPath) {
+    const resolved = await validatedExecutable(explicitPath, platform, fileSystem);
+    if (resolved) return resolved;
     throw new CopilotRuntimeError('invalid_request');
   }
+
+  const executableName = platform === 'win32' ? 'copilot.exe' : 'copilot';
+  const pathValue = environmentValue(environment, 'PATH') ?? '';
+  const pathSeparator = platform === 'win32' ? ';' : ':';
+  const candidates = pathValue.split(pathSeparator).flatMap((entry) => {
+    const directory = entry.trim().replace(/^"(.*)"$/, '$1');
+    return directory && pathApi.isAbsolute(directory) ? [pathApi.join(directory, executableName)] : [];
+  });
+
+  if (platform === 'win32') {
+    const localAppData = environmentValue(environment, 'LOCALAPPDATA');
+    if (localAppData) candidates.push(pathApi.join(localAppData, 'Microsoft', 'WinGet', 'Links', 'copilot.exe'));
+  } else if (platform === 'darwin') {
+    candidates.push('/opt/homebrew/bin/copilot', '/usr/local/bin/copilot');
+  } else if (platform === 'linux') {
+    const home = environmentValue(environment, 'HOME');
+    if (home) candidates.push(pathApi.join(home, '.local', 'bin', 'copilot'));
+    candidates.push('/usr/local/bin/copilot');
+  }
+
+  for (const candidate of candidates) {
+    const resolved = await validatedExecutable(candidate, platform, fileSystem);
+    if (resolved) return resolved;
+  }
+  throw new CopilotRuntimeError('invalid_request');
 }
 
 function isGitHubDotComHost(value: unknown): boolean {
@@ -354,7 +422,7 @@ async function withClient<T>(
   timeoutMs: number,
   bindings: ResolvedCopilotSdkBindings,
 ): Promise<T> {
-  await validateRequest(request.cliPath);
+  const cliPath = await bindings.resolveCliPath(request.cliPath);
   throwIfAborted(request.signal);
   const workspace = await createClientWorkspace();
   try {
@@ -387,7 +455,7 @@ async function withClient<T>(
   try {
     throwIfAborted(controller.signal);
     const options: CopilotClientOptions = {
-      connection: bindings.stdioConnection(request.cliPath),
+      connection: bindings.stdioConnection(cliPath),
       mode: 'copilot-cli',
       workingDirectory: workspace.workingDirectory,
       logLevel: 'none',
