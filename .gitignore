@@ -1,8 +1,18 @@
-spec/
 node_modules/
-main.js
-copilot-sdk-runtime.cjs
-target/
-local-embedding-worker.js
-ort-wasm-simd-threaded.jsep.mjs
-ort-wasm-simd-threaded.jsep.wasm
+
+# Generated plugin bundles and local deployment output
+/main.js
+/copilot-sdk-runtime.cjs
+/local-embedding-worker.js
+/ort-wasm-simd-threaded.jsep.mjs
+/ort-wasm-simd-threaded.jsep.wasm
+/target/
+
+# Local worktrees and the Vault-linked spec path
+/.worktrees/
+/spec
+
+# Local credentials; keep example templates trackable
+.env
+.env.*
+!.env.example
