@@ -18,32 +18,22 @@ npm test
 
 ## Obsidian での確認
 
-Obsidian 1.11.4 以降を使用します。ビルドで生成する `target/` の `manifest.json`、`main.js`、`copilot-sdk-runtime.cjs`、`COPILOT_SDK_LICENSES.txt`、`local-embedding-worker.js`、`ort-wasm-simd-threaded.jsep.mjs`、`ort-wasm-simd-threaded.jsep.wasm`、`LOCAL_EMBEDDING_LICENSES.txt` をテスト用 Vault の `.obsidian/plugins/prism/` に置き、Obsidian のコミュニティプラグイン設定から Prism を有効にします。設定画面の Prism タブでは、Vault の Markdown が知識の正本であることを示す案内文を切り替えられます。
-
-Provider 設定で回答に使う接続とモデルを選び、API キー接続ではキーも入力します。既存ノートは Advanced の「Rebuild index」またはコマンドパレットの「Prism: Rebuild index」で検索索引を端末内で作成します。コマンドパレットの「Prism: Open Ask view」またはリボンの Prism アイコンから右サイドパネルに質問画面を開き、質問を入力して「Ask」を押します。回答中の引用番号または Sources 一覧の出典をクリック・タップすると、現在の Vault パスにある原文を開きます。原文が見つからない場合は質問画面に通知します。回答は Markdown に保存されません。
-
-起動時は右サイドパネルを開き、既存の Ask 画面を再利用します。中央など別の場所にある Ask 画面も、会話・入力・処理中の回答を保持して右サイドパネルに移します。中央のノートを閲覧しながら質問できます。
-
-同じ Ask 画面で追質問すると、質問・回答・出典がターンごとに順番に表示されます。送信済みの質問は右側、回答は左側のフキダシに表示され、配置と背景色で区別できます。各ターンで Vault を検索し、過去の回答は質問の文脈にだけ使います。「New conversation」で履歴をリセットできます。送信する履歴は直近の成功した最大 6 組の質問・回答、JSON 表現で 12,000 UTF-8 bytes までです。組を分割せず、収まらない組とそれ以前を省略して、そのターンに省略件数を表示します。検索には送信対象の過去の質問を加えます。長い会話や話題変更で結果が不十分な場合は、質問に対象を明記するか新しい会話を始めてください。失敗しても既存の会話と入力を保持し、最後の失敗ターンは「Retry」で再試行できます。送信中は入力・再送信・リセットを無効にします。同じ view の再表示では処理中の回答も保持します。view を破棄した場合やプラグインの再読み込み後は履歴が失われ、永続保存・端末間同期は行いません。
-
-Issue #72 の対話機能は共通の Obsidian View API・DOM・メモリ内状態で実装し、Desktop・iOS・Android 固有の依存を追加していません。2026-10-03 時点でモックによる自動検証を実施しました。Desktop・iOS・Android の実機での表示・操作、実際の LLM 接続での追質問品質は未確認です。
-
-入力欄の上に現在ステータスを表示します。入力待ち、回答待ち、回答完了、失敗を会話のスクロールと独立して確認でき、引用元を開いた結果は別に通知します。入力・コンテキスト上限、出力トークン上限、利用枠、レート制限は、回答サービスが返すコード・終了理由で区別できる場合に表示します。原因を特定できない制限や途中終了は断定しません。途中終了した回答は取得済みの本文と出典を残して未完了と表示し、入力も保持します。未完了・失敗の回答は追質問の成功済み履歴に含めません。質問を短くする、新しい会話を始める、利用状況や設定を確認する、再試行するなどの対処を案内します。
-
-モデル ID と接続の選択はプラグイン設定データに保存されます。OpenAI API キーと ChatGPT/Codex の認証情報は Obsidian Secret Storage に保存されます。GitHub Copilot では Prism に確認済みの GitHub.com host と login だけを保存し、CLI 認証情報は Copilot CLI の通常のユーザー認証領域で管理します。Prism から切断しても CLI からログアウトしません。旧バージョンが保存した Prism の OAuth secret と Client ID は更新時に消去し、CLI の認証情報には触れません。回答生成時には質問、送信対象の過去の質問・回答、取得した source ID・chunk ID・本文が選択した OpenAI API、ChatGPT/Codex、または GitHub Copilot の接続先に送られます。Ask 画面の「Data sent」にも送信範囲を表示します。索引作成・更新・検索質問のベクトル化は端末内で処理し、OpenAI Embeddings API への送信は行いません。検索方式が Local full-text の場合はローカル全文検索、Local Embedding の場合は端末内のベクトル化と全文検索を使います。Advanced ではファイル・フォルダを検索索引から除外できます。
+ビルド後、`target/` 内の成果物をテスト用 Vault の `.obsidian/plugins/prism/` にコピーします。
 
 ## ChatGPT (Codex) 接続
 
-設定の「LLM connection」で「ChatGPT (Codex, experimental)」を選び、「Connect」で表示されたコードを OpenAI の Device Code 認証ページに入力します。ChatGPT 側の設定で Device Code ログインの有効化が必要な場合があります。接続後は Codex モデル ID を指定します。「Test connection」は固定文 `Reply with OK.` のみを `https://chatgpt.com/backend-api/codex/responses` に送信し、現在の接続で応答できるか確認します。このテストでは Vault の内容を送信しません。ChatGPT 認証情報はデバイスごとの Obsidian Secret Storage に保存され、「Sign out」でローカルから消去されます。
-
-接続済みで設定を開くと、モデル一覧を自動取得してメモリ内に保持します。「Refresh models」で最新の一覧を取得でき、失敗時は表示された状態を確認して同じボタンで再試行できます。保存済みの選択モデルは保持され、一覧にない場合は「saved model」と表示します。一覧取得では OAuth トークンを `chatgpt.com` に送信し、Vault 本文は送信しません。
-
-この接続は Codex との実験的な互換方式です。回答時には質問、送信対象の過去の質問・回答、検索で選ばれた出典 ID・本文を `https://chatgpt.com/backend-api/codex/responses` に送信します。公開 API とは異なる経路なので、OpenAI 側の変更で動作しなくなる可能性があります。認証や回答が失敗しても、OpenAI API キーでの課金へ自動的に切り替わりません。Local Embedding と全文検索には Embedding API キーは不要です。
+設定の「LLM connection」で「ChatGPT (Codex, experimental)」を選び、「Connect」で表示されたコードを OpenAI の認証ページに入力します。
 
 ## GitHub Copilot (Desktop)
 
-GitHub Copilot は公式 SDK を使う Obsidian Desktop 専用の接続です。互換性のある Copilot CLI を利用者がインストールし、端末のターミナルで公式 `copilot login` OAuth による認証を行ってから、Prism の `Check CLI login` で GitHub.com の login を確認します。Prism は対応する CLI を自動検出します。OAuth App の登録、Client ID、Prism に渡す token も不要です。CLI の準備、model 選択、送信データについては [GitHub Copilot 接続手順](docs/github-copilot.md) を参照してください。iOS と Android ではこの runtime を読み込まず、既存の API キーと Codex 接続を引き続き利用できます。
+Obsidian Desktop では Copilot CLI を `copilot login` で認証し、Prism 設定の「Check CLI login」を実行します。詳細は [GitHub Copilot 接続手順](docs/github-copilot.md) を参照してください。
 
 ## ローカル Embedding
 
-検索方式の選択・モデル導入・負荷と検証状況は [ローカル Embedding の利用手順](docs/local-embedding.md) を参照してください。
+使い方は [ローカル Embedding の利用手順](docs/local-embedding.md) を参照してください。
+
+## データとプライバシー
+
+- 回答生成では、質問、送信対象の過去の質問・回答、取得した出典 ID・chunk ID・本文が選択した接続先に送られます。送信範囲は Ask の「Data sent」で確認できます。「Test connection」とモデル一覧の取得では Vault 本文を送信しません。
+- OpenAI API キーと ChatGPT/Codex 認証は Obsidian Secret Storage に保存します。Copilot CLI の認証情報は CLI が管理し、Prism には GitHub.com host と login だけを保存します。
+- 全文検索とベクトル化は端末内で処理し、OpenAI Embeddings API は使いません。ChatGPT/Codex の接続に失敗しても、OpenAI API キー接続へ自動的に切り替わりません。
