@@ -134,10 +134,37 @@ test('sidecar loads lazily only on Desktop and failure hides local path details'
   });
   await assert.rejects(provider.listModels(), (error) => {
     assert.equal(error.code, 'unavailable');
+    assert.equal(error.stage, 'sidecar_load');
     assert.doesNotMatch(error.message, /private|extension/);
     return true;
   });
   assert.equal(sidecarLoads.length, 1);
+});
+
+test('provider preserves only whitelisted runtime stages and drops malformed diagnostic details', async () => {
+  for (const [stage, expectedStage] of [
+    ['cli_start', 'cli_start'],
+    ['C:\\private\\token-file', undefined],
+  ]) {
+    const runtime = {
+      async getAuthStatus() {
+        const error = new Error('private stderr and token fixture');
+        error.name = 'CopilotRuntimeError';
+        error.code = 'unavailable';
+        error.stage = stage;
+        throw error;
+      },
+      async listModels() { return []; },
+      async generate() { return { content: 'unused' }; },
+    };
+    const provider = providerWith(runtime);
+    await assert.rejects(provider.checkAuth(), (error) => {
+      assert.equal(error.code, 'unavailable');
+      assert.equal(error.stage, expectedStage);
+      assert.doesNotMatch(error.message, /private|stderr|token|file/);
+      return true;
+    });
+  }
 });
 
 test('cancel settles a pending CLI identity check and blocks any later model or prompt work', async () => {

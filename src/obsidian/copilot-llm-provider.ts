@@ -6,9 +6,25 @@ import type {
   CopilotGenerateRequest,
   CopilotModelInfo,
   CopilotModelListRequest,
+  CopilotRuntimeErrorStage,
   CopilotRuntimeErrorCode,
   CopilotSdkRuntime,
 } from './copilot-sdk-runtime';
+
+const SAFE_COPILOT_RUNTIME_STAGES: readonly CopilotRuntimeErrorStage[] = [
+  'sidecar_load', 'cli_discovery', 'workspace', 'cli_start', 'auth_status', 'identity', 'cleanup',
+];
+
+function isSafeCopilotRuntimeStage(value: unknown): value is CopilotRuntimeErrorStage {
+  return typeof value === 'string' && SAFE_COPILOT_RUNTIME_STAGES.includes(value as CopilotRuntimeErrorStage);
+}
+
+export class CopilotLLMProviderError extends LLMProviderError {
+  constructor(code: CopilotRuntimeErrorCode, readonly stage?: CopilotRuntimeErrorStage) {
+    super(code);
+    this.name = 'CopilotLLMProviderError';
+  }
+}
 
 export interface CopilotLLMProviderOptions {
   expectedAccount?: CopilotAccount;
@@ -21,11 +37,14 @@ export interface CopilotLLMProviderOptions {
 
 function safeRuntimeError(error: unknown): LLMProviderError {
   if (error instanceof LLMProviderError) return error;
-  if (error instanceof Error && error.name === 'CopilotRuntimeError') {
-    const code = (error as Error & { code?: unknown }).code;
+  if (error && typeof error === 'object' && (error as { name?: unknown }).name === 'CopilotRuntimeError') {
+    const details = error as { code?: unknown; stage?: unknown };
+    const code = details.code;
     if (code === 'authentication' || code === 'rate_limit' || code === 'quota' || code === 'usage_limit' ||
         code === 'context_limit' || code === 'invalid_request' || code === 'unavailable' || code === 'unknown') {
-      return new LLMProviderError(code satisfies CopilotRuntimeErrorCode);
+      const stage = details.stage;
+      return new CopilotLLMProviderError(code satisfies CopilotRuntimeErrorCode,
+        isSafeCopilotRuntimeStage(stage) ? stage : undefined);
     }
   }
   return new LLMProviderError('unknown');
@@ -34,14 +53,14 @@ function safeRuntimeError(error: unknown): LLMProviderError {
 function runtimeFromSidecar(sidecarPath: string): CopilotSdkRuntime {
   let loaded: unknown;
   try { loaded = require(sidecarPath); }
-  catch { throw new LLMProviderError('unavailable'); }
-  if (!loaded || typeof loaded !== 'object') throw new LLMProviderError('unavailable');
+  catch { throw new CopilotLLMProviderError('unavailable', 'sidecar_load'); }
+  if (!loaded || typeof loaded !== 'object') throw new CopilotLLMProviderError('unavailable', 'sidecar_load');
   const runtime = (loaded as { copilotSdkRuntime?: unknown }).copilotSdkRuntime;
   if (!runtime || typeof runtime !== 'object' ||
       typeof (runtime as CopilotSdkRuntime).getAuthStatus !== 'function' ||
       typeof (runtime as CopilotSdkRuntime).listModels !== 'function' ||
       typeof (runtime as CopilotSdkRuntime).generate !== 'function') {
-    throw new LLMProviderError('unavailable');
+    throw new CopilotLLMProviderError('unavailable', 'sidecar_load');
   }
   return runtime as CopilotSdkRuntime;
 }

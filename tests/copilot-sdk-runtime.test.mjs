@@ -40,6 +40,7 @@ function makeHarness(options = {}) {
     resolveCliPath: options.resolveCliPath ?? (async () => process.execPath),
     stdioConnection(path) {
       calls.push(['stdio', path]);
+      if (options.stdioConnection) return options.stdioConnection(path);
       return { path };
     },
     createClient(clientOptions) {
@@ -88,7 +89,10 @@ function makeHarness(options = {}) {
           await stat(clientOptions.workingDirectory);
           return options.stopErrors ?? [];
         },
-        async forceStop() { calls.push(['forceStop']); },
+        async forceStop() {
+          calls.push(['forceStop']);
+          if (options.forceStop) return options.forceStop();
+        },
       };
       return client;
     },
@@ -228,6 +232,82 @@ test('explicit CLI login check accepts a stored OAuth user identity and persists
   assert.equal(Object.hasOwn(config, 'baseDirectory'), false);
   assert.equal(harness.calls.filter(([kind]) => kind === 'getAuthStatus').length, 1);
   assert.equal(harness.calls.some(([kind]) => kind === 'listModels' || kind === 'createSession'), false);
+});
+
+test('CLI login errors carry safe stages for discovery, startup, status RPC, and identity rejection', async () => {
+  const discovery = makeHarness({
+    async resolveCliPath() {
+      const error = new Error('private executable path and stderr credential');
+      error.code = 'ENOENT';
+      throw error;
+    },
+  });
+  await assert.rejects(discovery.runtime.getAuthStatus({}), (error) => {
+    assert.equal(errorCode(error), 'invalid_request');
+    assert.equal(error.stage, 'cli_discovery');
+    assert.doesNotMatch(error.message, /private|credential/);
+    return true;
+  });
+  assert.deepEqual(discovery.calls, []);
+
+  const startup = makeHarness({ start: async () => { throw new Error('private executable path and stderr credential'); } });
+  await assert.rejects(startup.runtime.getAuthStatus({}), (error) => {
+    assert.equal(errorCode(error), 'unknown');
+    assert.equal(error.stage, 'cli_start');
+    assert.doesNotMatch(error.message, /private|credential/);
+    return true;
+  });
+
+  const connection = makeHarness({
+    stdioConnection() { throw new Error('private connection options path and stderr credential'); },
+  });
+  await assert.rejects(connection.runtime.getAuthStatus({}), (error) => {
+    assert.equal(errorCode(error), 'unknown');
+    assert.equal(error.stage, 'cli_start');
+    assert.doesNotMatch(error.message, /private|path|stderr|credential/);
+    return true;
+  });
+  assert.equal(connection.calls.some(([kind]) => kind === 'client' || kind === 'start'), false);
+
+  const authStatus = makeHarness({ authStatus: async () => { throw new Error('private auth response and credential'); } });
+  await assert.rejects(authStatus.runtime.getAuthStatus({}), (error) => {
+    assert.equal(errorCode(error), 'unknown');
+    assert.equal(error.stage, 'auth_status');
+    assert.doesNotMatch(error.message, /private|credential/);
+    return true;
+  });
+
+  const identity = makeHarness({ authStatus: { isAuthenticated: false, authType: 'token', host: 'github.com', login: 'user' } });
+  await assert.rejects(identity.runtime.getAuthStatus({}), (error) => {
+    assert.equal(errorCode(error), 'authentication');
+    assert.equal(error.stage, 'identity');
+    return true;
+  });
+});
+
+test('cleanup failure preserves a primary SDK error and is reported only after success', async () => {
+  const primary = makeHarness({
+    start: async () => { throw new Error('private startup error'); },
+    stopErrors: [new Error('private cleanup error')],
+    async forceStop() { throw new Error('private cleanup error'); },
+  });
+  await assert.rejects(primary.runtime.getAuthStatus({}), (error) => {
+    assert.equal(errorCode(error), 'unknown');
+    assert.equal(error.stage, 'cli_start');
+    assert.doesNotMatch(error.message, /private|cleanup/);
+    return true;
+  });
+
+  const cleanup = makeHarness({
+    stopErrors: [new Error('private cleanup error')],
+    async forceStop() { throw new Error('private cleanup error'); },
+  });
+  await assert.rejects(cleanup.runtime.getAuthStatus({}), (error) => {
+    assert.equal(errorCode(error), 'unavailable');
+    assert.equal(error.stage, 'cleanup');
+    assert.doesNotMatch(error.message, /private|cleanup/);
+    return true;
+  });
 });
 
 test('automatic Windows discovery follows PATH order and resolves native executables', async () => {

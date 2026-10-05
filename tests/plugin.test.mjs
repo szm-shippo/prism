@@ -1840,6 +1840,60 @@ test('Check CLI login explains how to install a CLI that cannot be auto-detected
   assert.equal(plugin.getCopilotStatus().account, undefined);
 });
 
+test('Check CLI login shows fixed stage guidance without exposing runtime details', async () => {
+  const expectedNotices = {
+    sidecar_load: 'Prism could not load its GitHub Copilot runtime. Update or reinstall Prism, then restart Obsidian.',
+    cli_discovery: 'Could not find or start a compatible Copilot CLI. Install it, add it to PATH, restart Obsidian if it is not on PATH, then click Check CLI login again.',
+    workspace: 'Prism could not prepare the temporary GitHub Copilot workspace. Check that local temporary storage is available, then try again.',
+    cli_start: 'Prism found a Copilot CLI but could not start its SDK connection. Check the CLI installation and restart Obsidian, then try again.',
+    auth_status: 'Copilot CLI started, but Prism could not read its login status. Update the GitHub Copilot CLI, then check again.',
+    identity: 'No GitHub.com Copilot CLI OAuth login was found. Run copilot login in a terminal, then check again.',
+    cleanup: 'Prism could not finish cleaning up GitHub Copilot CLI resources. Restart Obsidian, then try again.',
+  };
+  const codes = {
+    sidecar_load: 'unavailable', cli_discovery: 'invalid_request', workspace: 'unavailable',
+    cli_start: 'unknown', auth_status: 'unknown', identity: 'authentication', cleanup: 'unavailable',
+  };
+
+  for (const [stage, expectedNotice] of Object.entries(expectedNotices)) {
+    const { plugin, tabs, notices, requests } = await loadPlugin({ llmConnection: 'github-copilot' });
+    plugin.manifest.dir = '.obsidian/plugins/prism';
+    const harness = createCopilotRuntime({ account: { host: 'github.com', login: 'cli-user' } });
+    const error = new Error('private runtime stderr token and executable path');
+    error.name = 'CopilotRuntimeError';
+    error.code = codes[stage];
+    error.stage = stage;
+    harness.setAuthFailure(error);
+    plugin.copilotRuntime = harness.runtime;
+
+    tabs[0].display();
+    const accountSetting = tabs[0].containerEl.children.find((item) => item.name === 'GitHub account');
+    await accountSetting.buttons.find((button) => button.label === 'Check CLI login').click();
+
+    assert.equal(notices.at(-1), expectedNotice);
+    assert.doesNotMatch(notices.at(-1), /private|stderr|token|executable path/);
+    assert.equal(harness.calls.getAuthStatus.length, 1);
+    assert.equal(harness.calls.listModels.length, 0);
+    assert.equal(harness.calls.generate.length, 0);
+    assert.equal(requests.length, 0);
+  }
+
+  const { plugin, tabs, notices } = await loadPlugin({ llmConnection: 'github-copilot' });
+  plugin.manifest.dir = '.obsidian/plugins/prism';
+  const malformedHarness = createCopilotRuntime({ account: { host: 'github.com', login: 'cli-user' } });
+  const malformedError = new Error('private diagnostic path');
+  malformedError.name = 'CopilotRuntimeError';
+  malformedError.code = 'unavailable';
+  malformedError.stage = 'C:\\private\\diagnostic';
+  malformedHarness.setAuthFailure(malformedError);
+  plugin.copilotRuntime = malformedHarness.runtime;
+  tabs[0].display();
+  const malformedSetting = tabs[0].containerEl.children.find((item) => item.name === 'GitHub account');
+  await malformedSetting.buttons.find((button) => button.label === 'Check CLI login').click();
+  assert.equal(notices.at(-1), 'Prism could not check the GitHub Copilot CLI login. Verify the CLI installation and login, then try again.');
+  assert.doesNotMatch(notices.at(-1), /private|diagnostic/);
+});
+
 test('pathless Check CLI login and Copilot model/test actions work', async () => {
   const account = { host: 'github.com', login: 'cli-user' };
   const { plugin, tabs, writes, notices, requests } = await loadPlugin({

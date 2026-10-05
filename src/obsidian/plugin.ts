@@ -16,8 +16,8 @@ import { OpenAILLMProvider } from './openai-llm-provider';
 import { CodexAuth, CodexModelListError, type DevicePrompt } from './codex-auth';
 import { CodexLLMProvider } from './codex-llm-provider';
 import { clearLegacyCopilotCredential } from './copilot-auth';
-import { CopilotLLMProvider } from './copilot-llm-provider';
-import type { CopilotModelInfo, CopilotSdkRuntime } from './copilot-sdk-runtime';
+import { CopilotLLMProvider, CopilotLLMProviderError } from './copilot-llm-provider';
+import type { CopilotModelInfo, CopilotRuntimeErrorStage, CopilotSdkRuntime } from './copilot-sdk-runtime';
 import { LLMProviderError } from '../core/provider/llm-provider';
 import { CHAT_VIEW_TYPE, PrismChatView } from './chat-view';
 import { loadSettings, type CopilotAccount, type PluginSettings } from '../settings';
@@ -33,6 +33,35 @@ function joinDesktopPath(root: string, directory: string, filename: string): str
     .replace(new RegExp(`^${separator === '\\' ? '\\\\' : '/'}`), '')
     .replace(/[\\/]+$/, '')).filter(Boolean).join(separator);
   return normalizedRoot === separator ? `${separator}${relative}` : `${normalizedRoot}${separator}${relative}`;
+}
+
+const COPILOT_LOGIN_STAGE_NOTICES: Record<CopilotRuntimeErrorStage, string> = {
+  sidecar_load: 'Prism could not load its GitHub Copilot runtime. Update or reinstall Prism, then restart Obsidian.',
+  cli_discovery: 'Could not find or start a compatible Copilot CLI. Install it, add it to PATH, restart Obsidian if it is not on PATH, then click Check CLI login again.',
+  workspace: 'Prism could not prepare the temporary GitHub Copilot workspace. Check that local temporary storage is available, then try again.',
+  cli_start: 'Prism found a Copilot CLI but could not start its SDK connection. Check the CLI installation and restart Obsidian, then try again.',
+  auth_status: 'Copilot CLI started, but Prism could not read its login status. Update the GitHub Copilot CLI, then check again.',
+  identity: 'No GitHub.com Copilot CLI OAuth login was found. Run copilot login in a terminal, then check again.',
+  cleanup: 'Prism could not finish cleaning up GitHub Copilot CLI resources. Restart Obsidian, then try again.',
+};
+
+function copilotLoginFailureNotice(error: unknown): string {
+  // Copilot errors can cross the runtime sidecar/test VM boundary, so use the
+  // diagnostic name and a fixed own-property whitelist instead of instanceof.
+  if (error && typeof error === 'object' &&
+      (error as { name?: unknown }).name === 'CopilotLLMProviderError') {
+    const stage = (error as { stage?: unknown }).stage;
+    if (typeof stage === 'string' && Object.prototype.hasOwnProperty.call(COPILOT_LOGIN_STAGE_NOTICES, stage)) {
+      return COPILOT_LOGIN_STAGE_NOTICES[stage as CopilotRuntimeErrorStage];
+    }
+  }
+  if (error instanceof LLMProviderError && error.code === 'authentication') {
+    return COPILOT_LOGIN_STAGE_NOTICES.identity;
+  }
+  if (error instanceof LLMProviderError && error.code === 'invalid_request') {
+    return COPILOT_LOGIN_STAGE_NOTICES.cli_discovery;
+  }
+  return 'Prism could not check the GitHub Copilot CLI login. Verify the CLI installation and login, then try again.';
 }
 
 export default class PrismPlugin extends Plugin {
@@ -880,14 +909,7 @@ class PrismSettingTab extends PluginSettingTab {
           .addButton((button) => button.setButtonText('Check CLI login')
             .onClick(async () => {
               try { await this.prism.checkCopilotLogin(); this.display(); }
-              catch (error) {
-                const message = error instanceof LLMProviderError && error.code === 'authentication'
-                  ? 'No GitHub.com Copilot CLI OAuth login was found. Run copilot login in a terminal, then check again.'
-                  : error instanceof LLMProviderError && error.code === 'invalid_request'
-                    ? 'Could not find or start a compatible Copilot CLI. Install it, add it to PATH, restart Obsidian if it is not on PATH, then click Check CLI login again.'
-                    : 'Prism could not check the GitHub Copilot CLI login. Verify the CLI installation and login, then try again.';
-                new Notice(message);
-              }
+              catch (error) { new Notice(copilotLoginFailureNotice(error)); }
             }))
           .addButton((button) => button.setButtonText('Disconnect Prism')
             .setDisabled(!account)

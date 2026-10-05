@@ -100,6 +100,18 @@ export type CopilotRuntimeErrorCode =
   | 'authentication' | 'rate_limit' | 'quota' | 'usage_limit' | 'context_limit'
   | 'invalid_request' | 'unavailable' | 'unknown';
 
+export type CopilotRuntimeErrorStage =
+  | 'sidecar_load' | 'cli_discovery' | 'workspace' | 'cli_start'
+  | 'auth_status' | 'identity' | 'cleanup';
+
+const COPILOT_RUNTIME_ERROR_STAGES: readonly CopilotRuntimeErrorStage[] = [
+  'sidecar_load', 'cli_discovery', 'workspace', 'cli_start', 'auth_status', 'identity', 'cleanup',
+];
+
+export function isCopilotRuntimeErrorStage(value: unknown): value is CopilotRuntimeErrorStage {
+  return typeof value === 'string' && COPILOT_RUNTIME_ERROR_STAGES.includes(value as CopilotRuntimeErrorStage);
+}
+
 const SAFE_RUNTIME_MESSAGES: Record<CopilotRuntimeErrorCode, string> = {
   authentication: 'GitHub Copilot authentication failed.',
   rate_limit: 'GitHub Copilot rate limit reached.',
@@ -112,7 +124,7 @@ const SAFE_RUNTIME_MESSAGES: Record<CopilotRuntimeErrorCode, string> = {
 };
 
 export class CopilotRuntimeError extends Error {
-  constructor(readonly code: CopilotRuntimeErrorCode) {
+  constructor(readonly code: CopilotRuntimeErrorCode, readonly stage?: CopilotRuntimeErrorStage) {
     super(SAFE_RUNTIME_MESSAGES[code]);
     this.name = 'CopilotRuntimeError';
   }
@@ -169,6 +181,13 @@ async function validatedExecutable(
   } catch { return undefined; }
 }
 
+function runtimeErrorAtStage(error: unknown, stage: CopilotRuntimeErrorStage): CopilotRuntimeError {
+  if (error instanceof CopilotRuntimeError) {
+    return error.stage ? error : new CopilotRuntimeError(error.code, stage);
+  }
+  return new CopilotRuntimeError(runtimeCodeForThrown(error), stage);
+}
+
 export async function resolveCopilotCliPath(
   options: CopilotCliPathResolverOptions = {},
 ): Promise<string> {
@@ -199,7 +218,7 @@ export async function resolveCopilotCliPath(
     const resolved = await validatedExecutable(candidate, platform, fileSystem);
     if (resolved) return resolved;
   }
-  throw new CopilotRuntimeError('invalid_request');
+  throw new CopilotRuntimeError('invalid_request', 'cli_discovery');
 }
 
 function isGitHubDotComHost(value: unknown): boolean {
@@ -214,13 +233,13 @@ function isGitHubDotComHost(value: unknown): boolean {
 
 function copilotUserIdentity(status: unknown): CopilotAccount {
   if (!status || typeof status !== 'object' || Array.isArray(status)) {
-    throw new CopilotRuntimeError('authentication');
+    throw new CopilotRuntimeError('authentication', 'identity');
   }
   const value = status as Record<string, unknown>;
   const login = typeof value.login === 'string' ? value.login.trim() : '';
   if (value.isAuthenticated !== true || value.authType !== 'user' || !isGitHubDotComHost(value.host) ||
       !/^[A-Za-z0-9-]{1,39}$/.test(login)) {
-    throw new CopilotRuntimeError('authentication');
+    throw new CopilotRuntimeError('authentication', 'identity');
   }
   return { host: 'github.com', login };
 }
@@ -257,7 +276,7 @@ async function stopClient(client: RuntimeClient): Promise<void> {
   finally { if (timer !== undefined) clearTimeout(timer); }
   if ('timedOut' in stopped || stopped.errors.length > 0) {
     try { await client.forceStop(); }
-    catch { throw new CopilotRuntimeError('unavailable'); }
+    catch { throw new CopilotRuntimeError('unavailable', 'cleanup'); }
   }
 }
 
@@ -266,7 +285,7 @@ function removeOwnedWorkspace(path: string): Promise<void> {
   const fromTemp = relative(resolve(tmpdir()), resolved);
   if (!basename(resolved).startsWith(TEMP_DIRECTORY_PREFIX) || fromTemp !== basename(resolved) || !fromTemp ||
       fromTemp === '..' || fromTemp.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`) || isAbsolute(fromTemp)) {
-    throw new CopilotRuntimeError('unavailable');
+    throw new CopilotRuntimeError('unavailable', 'workspace');
   }
   return rm(resolved, { recursive: true, force: true });
 }
@@ -390,7 +409,9 @@ function sessionConfig(request: CopilotGenerateRequest, workingDirectory: string
 }
 
 async function createClientWorkspace(): Promise<RuntimeWorkspace> {
-  const root = await mkdtemp(join(tmpdir(), 'prism-copilot-'));
+  let root: string;
+  try { root = await mkdtemp(join(tmpdir(), TEMP_DIRECTORY_PREFIX)); }
+  catch { throw new CopilotRuntimeError('unavailable', 'workspace'); }
   try {
     const workingDirectory = join(root, 'workspace');
     const configDirectory = join(root, 'session-config');
@@ -403,24 +424,27 @@ async function createClientWorkspace(): Promise<RuntimeWorkspace> {
     return { root, workingDirectory, configDirectory, providersConfigFile };
   } catch {
     await quietly(() => removeOwnedWorkspace(root));
-    throw new CopilotRuntimeError('unavailable');
+    throw new CopilotRuntimeError('unavailable', 'workspace');
   }
 }
 
 async function withClient<T>(
   request: CopilotAuthStatusRequest,
-  action: (client: RuntimeClient, workspace: RuntimeWorkspace, signal: AbortSignal) => Promise<T>,
+  action: (client: RuntimeClient, workspace: RuntimeWorkspace, signal: AbortSignal,
+    setStage: (stage: CopilotRuntimeErrorStage) => void) => Promise<T>,
   timeoutMs: number,
   bindings: ResolvedCopilotSdkBindings,
 ): Promise<T> {
-  const cliPath = await bindings.resolveCliPath();
+  let cliPath: string;
+  try { cliPath = await bindings.resolveCliPath(); }
+  catch (error) { throw runtimeErrorAtStage(error, 'cli_discovery'); }
   throwIfAborted(request.signal);
   const workspace = await createClientWorkspace();
   try {
     await bindings.afterWorkspaceCreated?.(workspace);
   } catch {
     await quietly(() => removeOwnedWorkspace(workspace.root));
-    throw new CopilotRuntimeError('unavailable');
+    throw new CopilotRuntimeError('unavailable', 'workspace');
   }
   const controller = new AbortController();
   let timedOut = false;
@@ -432,6 +456,8 @@ async function withClient<T>(
     controller.abort();
   }, timeoutMs);
   let client: RuntimeClient | undefined;
+  let operationFailed = false;
+  let operationStage: CopilotRuntimeErrorStage = 'cli_start';
   let actionPromise: Promise<T> | undefined;
   let stopPromise: Promise<void> | undefined;
   let rejectOnAbort: ((error: Error) => void) | undefined;
@@ -445,24 +471,31 @@ async function withClient<T>(
   if (controller.signal.aborted) stopOnAbort();
   try {
     throwIfAborted(controller.signal);
-    const options: CopilotClientOptions = {
-      connection: bindings.stdioConnection(cliPath),
-      mode: 'copilot-cli',
-      workingDirectory: workspace.workingDirectory,
-      logLevel: 'none',
-      env: {
-        ...runtimeEnvironment(),
-        COPILOT_PROVIDERS_CONFIG: workspace.providersConfigFile,
-      },
-      useLoggedInUser: true,
-    };
-    client = bindings.createClient(options);
+    try {
+      const options: CopilotClientOptions = {
+        connection: bindings.stdioConnection(cliPath),
+        mode: 'copilot-cli',
+        workingDirectory: workspace.workingDirectory,
+        logLevel: 'none',
+        env: {
+          ...runtimeEnvironment(),
+          COPILOT_PROVIDERS_CONFIG: workspace.providersConfigFile,
+        },
+        useLoggedInUser: true,
+      };
+      client = bindings.createClient(options);
+    } catch (error) {
+      if (timedOut) throw new CopilotRuntimeError('unavailable', 'cli_start');
+      if (request.signal?.aborted) throw new CopilotRuntimeError('unknown');
+      throw runtimeErrorAtStage(error, 'cli_start');
+    }
     throwIfAborted(controller.signal);
-    actionPromise = action(client, workspace, controller.signal);
+    actionPromise = action(client, workspace, controller.signal, (stage) => { operationStage = stage; });
     void actionPromise.catch(() => undefined);
     return await Promise.race([actionPromise, abortPromise]);
   } catch (error) {
-    if (timedOut) throw new CopilotRuntimeError('unavailable');
+    operationFailed = true;
+    if (timedOut) throw new CopilotRuntimeError('unavailable', operationStage);
     if (error instanceof CopilotRuntimeError) throw error;
     if (request.signal?.aborted) throw new CopilotRuntimeError('unknown');
     throw new CopilotRuntimeError(runtimeCodeForThrown(error));
@@ -477,29 +510,50 @@ async function withClient<T>(
       }
       await removeOwnedWorkspace(workspace.root);
     } catch {
-      throw new CopilotRuntimeError('unavailable');
+      if (!operationFailed) throw new CopilotRuntimeError('unavailable', 'cleanup');
     }
   }
+}
+
+async function startClient(
+  client: RuntimeClient,
+  setStage: (stage: CopilotRuntimeErrorStage) => void,
+): Promise<void> {
+  setStage('cli_start');
+  try { await client.start(); }
+  catch (error) { throw runtimeErrorAtStage(error, 'cli_start'); }
+}
+
+async function getAuthStatus(
+  client: RuntimeClient,
+  setStage: (stage: CopilotRuntimeErrorStage) => void,
+): Promise<unknown> {
+  setStage('auth_status');
+  try { return await client.getAuthStatus(); }
+  catch (error) { throw runtimeErrorAtStage(error, 'auth_status'); }
 }
 
 export function createCopilotSdkRuntime(overrides: CopilotSdkBindings = {}): CopilotSdkRuntime {
   const bindings: ResolvedCopilotSdkBindings = { ...defaultBindings, ...overrides };
   return {
     async getAuthStatus(request): Promise<CopilotAccount> {
-      return withClient(request, async (client, _workspace, signal) => {
-        await client.start();
+      return withClient(request, async (client, _workspace, signal, setStage) => {
+        await startClient(client, setStage);
         throwIfAborted(signal);
-        const status = await client.getAuthStatus();
+        const status = await getAuthStatus(client, setStage);
         throwIfAborted(signal);
+        setStage('identity');
         return copilotUserIdentity(status);
       }, MODEL_LIST_TIMEOUT_MS, bindings);
     },
 
     async listModels(request): Promise<CopilotModelInfo[]> {
-      return withClient(request, async (client, _workspace, signal) => {
-        await client.start();
+      return withClient(request, async (client, _workspace, signal, setStage) => {
+        await startClient(client, setStage);
         throwIfAborted(signal);
-        requireExpectedCopilotUser(await client.getAuthStatus(), request.expectedAccount);
+        const status = await getAuthStatus(client, setStage);
+        setStage('identity');
+        requireExpectedCopilotUser(status, request.expectedAccount);
         throwIfAborted(signal);
         const models = await client.listModels();
         throwIfAborted(signal);
@@ -512,7 +566,7 @@ export function createCopilotSdkRuntime(overrides: CopilotSdkBindings = {}): Cop
     async generate(request): Promise<LLMResponse> {
       if (!request.modelId.trim()) throw new CopilotRuntimeError('invalid_request');
       const prompt = promptFor(request.messages, request.context);
-      return withClient(request, async (client, workspace, signal) => {
+      return withClient(request, async (client, workspace, signal, setStage) => {
         let session: RuntimeSession | undefined;
         let idleAborted = false;
         let requestTimedOut = false;
@@ -527,9 +581,11 @@ export function createCopilotSdkRuntime(overrides: CopilotSdkBindings = {}): Cop
         let unsubscribeError: (() => void) | undefined;
         let unsubscribeUsage: (() => void) | undefined;
         try {
-          await client.start();
+          await startClient(client, setStage);
           throwIfAborted(signal);
-          requireExpectedCopilotUser(await client.getAuthStatus(), request.expectedAccount);
+          const status = await getAuthStatus(client, setStage);
+          setStage('identity');
+          requireExpectedCopilotUser(status, request.expectedAccount);
           throwIfAborted(signal);
           session = await client.createSession(sessionConfig(request, workspace.workingDirectory, workspace.configDirectory));
           unsubscribeIdle = session.on('session.idle', (event) => {
