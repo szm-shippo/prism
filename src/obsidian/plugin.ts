@@ -896,7 +896,7 @@ class PrismSettingTab extends PluginSettingTab {
         });
         new Setting(containerEl)
           .setName('GitHub Copilot CLI executable')
-          .setDesc('Path to the compatible executable installed by you. Prism does not download or bundle the CLI.')
+          .setDesc('Set the absolute path to the compatible Copilot CLI executable installed by you, then run copilot login in a terminal. Prism does not download or bundle the CLI.')
           .addText((text) => text.setPlaceholder('Absolute path to Copilot CLI executable')
             .setValue(this.prism.settings.copilotCliPath)
             .onChange((value) => this.queueCopilotSetting(async () => {
@@ -909,16 +909,17 @@ class PrismSettingTab extends PluginSettingTab {
         new Setting(containerEl)
           .setName('GitHub account')
           .setDesc(account ? `Connected to Prism as ${account.login} (${account.host}).`
-            : 'No GitHub Copilot CLI account is connected to Prism. Run copilot login in a terminal, then check again.')
+            : this.prism.settings.copilotCliPath.trim()
+              ? 'No GitHub Copilot CLI account is connected to Prism. Run copilot login in a terminal, then check again.'
+              : 'Set the absolute path to the compatible Copilot CLI executable above, then run copilot login in a terminal and check again.')
           .addButton((button) => button.setButtonText('Check CLI login')
-            .setDisabled(!this.prism.settings.copilotCliPath.trim())
             .onClick(async () => {
               try { await this.prism.checkCopilotLogin(); this.display(); }
               catch (error) {
                 const message = error instanceof LLMProviderError && error.code === 'authentication'
                   ? 'No GitHub.com Copilot CLI OAuth login was found. Run copilot login in a terminal, then check again.'
                   : error instanceof LLMProviderError && error.code === 'invalid_request'
-                    ? 'Set the absolute path to your compatible GitHub Copilot CLI executable first.'
+                    ? 'Set the absolute path to the compatible GitHub Copilot CLI executable in the field above, then try again.'
                     : 'Prism could not check the GitHub Copilot CLI login. Check the CLI path and try again.';
                 new Notice(message);
               }

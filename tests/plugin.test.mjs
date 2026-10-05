@@ -1790,6 +1790,32 @@ test('legacy Copilot token-only settings migrate even without a client ID', asyn
   assert.equal(Object.hasOwn(writes[0], 'copilotClientId'), false);
   assert.equal(requests.length, 0);
 });
+test('Check CLI login explains the missing executable path instead of disabling the control', async () => {
+  const { plugin, tabs, notices, requests } = await loadPlugin({ llmConnection: 'github-copilot' });
+  plugin.manifest.dir = '.obsidian/plugins/prism';
+  const harness = createCopilotRuntime({ account: { host: 'github.com', login: 'cli-user' } });
+  plugin.copilotRuntime = harness.runtime;
+
+  tabs[0].display();
+  const settings = tabs[0].containerEl.children;
+  const pathSetting = settings.find((item) => item.name === 'GitHub Copilot CLI executable');
+  const accountSetting = settings.find((item) => item.name === 'GitHub account');
+  const checkButton = accountSetting.buttons.find((button) => button.label === 'Check CLI login');
+
+  assert.equal(plugin.settings.copilotCliPath, '');
+  assert.match(pathSetting.description, /absolute path.*copilot login/i);
+  assert.match(accountSetting.description, /absolute path.*above.*copilot login/i);
+  assert.equal(checkButton.disabled ?? false, false);
+  await checkButton.click();
+
+  assert.equal(notices.at(-1), 'Set the absolute path to the compatible GitHub Copilot CLI executable in the field above, then try again.');
+  assert.equal(harness.calls.getAuthStatus.length, 0);
+  assert.equal(harness.calls.listModels.length, 0);
+  assert.equal(harness.calls.generate.length, 0);
+  assert.equal(requests.length, 0);
+  assert.equal(plugin.getCopilotStatus().account, undefined);
+});
+
 test('Check CLI login stores only verified identity and uses the new account controls', async () => {
   const account = { host: 'github.com', login: 'cli-user' };
   const secrets = new Map([
