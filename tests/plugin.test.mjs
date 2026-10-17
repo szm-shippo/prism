@@ -244,6 +244,7 @@ class MockElement {
     this.children = [];
     this.listeners = new Map();
     this.style = {};
+    this.attributes = {};
     this.textContent = '';
     this.value = '';
     this.disabled = false;
@@ -254,14 +255,19 @@ class MockElement {
   createEl(tag, options = {}) {
     const child = new MockElement(tag);
     child.textContent = options.text ?? '';
-    child.attributes = options.attr ?? {};
+    child.text = options.text;
+    child.attributes = { ...(options.attr ?? {}) };
+    if (options.href !== undefined) child.href = options.href;
     if (options.cls) child.addClass(options.cls);
     this.children.push(child);
     return child;
   }
   createDiv(options) { return this.createEl('div', options); }
+  createSpan(options) { return this.createEl('span', options); }
   addClass(name) { this.classes.push(name); }
   setAttribute(name, value) { this.attributes ??= {}; this.attributes[name] = value; }
+  getAttribute(name) { return this.attributes?.[name] ?? null; }
+  setAttr(name, value) { this.setAttribute(name, value); }
   addEventListener(name, callback) { this.listeners.set(name, callback); }
   focus() { this.focused = true; }
   submit() { return this.listeners.get('submit')({ preventDefault() {} }); }
@@ -278,7 +284,17 @@ function findElement(root, predicate) {
 }
 
 function visibleText(element) {
-  return element.textContent + element.children.map(visibleText).join('');
+  const ownText = element.textContent ?? element.text ?? '';
+  if (element.tag === 'details' && !element.open) {
+    const summary = element.children.find((child) => child.tag === 'summary');
+    return ownText + (summary ? visibleText(summary) : '');
+  }
+  return ownText + (element.children ?? []).map(visibleText).join('');
+}
+
+function allText(element) {
+  return (element.textContent ?? element.text ?? '') +
+    (element.children ?? []).map(allText).join('');
 }
 
 async function loadPlugin(savedData, failSave = false, storedSecrets = new Map(), responseOverride,
@@ -382,16 +398,7 @@ async function loadPlugin(savedData, failSave = false, storedSecrets = new Map()
   }
 
   class MockPluginSettingTab {
-    containerEl = {
-      children: [],
-      empty() { this.children = []; },
-      createEl(tag, options) {
-        const element = { tag, text: options.text, attributes: {},
-          setAttr(name, value) { this.attributes[name] = value; } };
-        this.children.push(element);
-        return element;
-      },
-    };
+    containerEl = new MockElement('div');
   }
 
   class MockModal {
@@ -401,65 +408,101 @@ async function loadPlugin(savedData, failSave = false, storedSecrets = new Map()
   }
 
   class MockSetting {
-    constructor(container) { container.children.push(this); }
-    setName(name) { this.name = name; return this; }
-    setDesc(description) { this.description = description; return this; }
+    constructor(container) {
+      this.tag = 'setting';
+      this.children = [];
+      this.components = [];
+      this.nameEl = new MockElement('div');
+      this.descEl = new MockElement('div');
+      this.controlEl = new MockElement('div');
+      this.children.push(this.nameEl, this.descEl, this.controlEl);
+      container.children.push(this);
+    }
+    setName(name) { this.name = name; this.nameEl.textContent = name; return this; }
+    setDesc(description) { this.description = description; this.descEl.textContent = description; return this; }
     addToggle(callback) {
       const toggle = {
+        toggleEl: new MockElement('div'),
         setValue(value) { this.value = value; return this; },
         onChange(handler) { this.change = handler; return this; },
       };
       callback(toggle);
       this.toggle = toggle;
+      this.components.push(toggle);
+      this.controlEl.children.push(toggle.toggleEl);
       return this;
     }
     addDropdown(callback) {
       const dropdown = {
         options: new Map(),
+        selectEl: new MockElement('select'),
         addOption(value, label) { this.options.set(value, label); return this; },
-        setValue(value) { this.value = value; return this; },
+        setValue(value) { this.value = value; this.selectEl.value = value; return this; },
         onChange(handler) { this.change = handler; return this; },
       };
       callback(dropdown);
       this.dropdown = dropdown;
+      this.components.push(dropdown);
+      this.controlEl.children.push(dropdown.selectEl);
       return this;
     }
     addText(callback) {
-      const listeners = new Map();
+      const inputEl = new MockElement('input');
       const text = {
         value: '',
-        inputEl: { type: 'text', addEventListener(name, handler) { listeners.set(name, handler); } },
+        inputEl,
         setPlaceholder(value) { this.placeholder = value; return this; },
-        setValue(value) { this.value = value; return this; },
+        setValue(value) { this.value = value; this.inputEl.value = value; return this; },
         getValue() { return this.value; },
         onChange(handler) { this.change = handler; return this; },
-        commit() { return listeners.get('change')?.(); },
-        blur() { return listeners.get('blur')?.(); },
+        commit() { this.value = this.inputEl.value; return this.inputEl.listeners.get('change')?.(); },
+        blur() { return this.inputEl.listeners.get('blur')?.(); },
       };
       callback(text);
       this.text = text;
+      this.components.push(text);
+      this.controlEl.children.push(text.inputEl);
       return this;
     }
     addTextArea(callback) {
       const text = {
         value: '',
+        inputEl: new MockElement('textarea'),
         setPlaceholder(value) { this.placeholder = value; return this; },
-        setValue(value) { this.value = value; return this; },
+        setValue(value) { this.value = value; this.inputEl.value = value; return this; },
         getValue() { return this.value; },
       };
       callback(text);
       this.textArea = text;
+      this.components.push(text);
+      this.controlEl.children.push(text.inputEl);
       return this;
     }
     addButton(callback) {
       const button = {
-        setButtonText(value) { this.label = value; return this; },
-        setDisabled(value) { this.disabled = value; return this; },
+        buttonEl: new MockElement('button'),
+        setButtonText(value) { this.label = value; this.buttonEl.textContent = value; return this; },
+        setIcon(value) {
+          this.icon = value;
+          this.buttonEl.textContent = '';
+          this.buttonEl.children = [];
+          this.buttonEl.setAttribute('data-icon', value);
+          this.buttonEl.createEl('svg');
+          return this;
+        },
+        setTooltip(value) {
+          this.buttonEl.setAttribute('aria-label', value);
+          this.tooltip = this.buttonEl.getAttribute('aria-label');
+          return this;
+        },
+        setDisabled(value) { this.disabled = value; this.buttonEl.disabled = value; return this; },
         onClick(handler) { this.click = handler; return this; },
       };
       callback(button);
       this.button = button;
       (this.buttons ??= []).push(button);
+      this.components.push(button);
+      this.controlEl.children.push(button.buttonEl);
       return this;
     }
   }
@@ -484,6 +527,10 @@ async function loadPlugin(savedData, failSave = false, storedSecrets = new Map()
         PluginSettingTab: MockPluginSettingTab,
         Modal: MockModal,
         Setting: MockSetting,
+        setIcon(parent, icon) {
+          parent.setAttribute('data-icon', icon);
+          parent.createEl('svg');
+        },
         Notice: class { constructor(message) { notices.push(message); } },
         TFile: MockTFile,
         requestUrl: async (request) => {
@@ -768,8 +815,8 @@ test('Ask retains ordered turns with their own sources, bounds history and reset
     await findElement(response, (element) => element.tag === 'button').click();
   }
   assert.deepEqual(opened, ['note-1.md', 'note-8.md']);
-  assert.match(visibleText(view.contentEl), /question\/answer pairs.*12,000 UTF-8 bytes/);
-  assert.match(visibleText(view.contentEl), /api\.openai\.com.*chatgpt\.com/);
+  assert.match(allText(view.contentEl), /question\/answer pairs.*12,000 UTF-8 bytes/);
+  assert.match(allText(view.contentEl), /api\.openai\.com.*chatgpt\.com/);
   await view.onClose();
   await view.onOpen();
   assert.equal(get((element) => element.classes.includes('prism-ask-conversation')).children.length, 8);
@@ -908,7 +955,7 @@ test('settings automatically load Codex models, preserve the saved selection and
   assert.equal(requests.filter((request) => request.url.includes('/codex/models')).length, 1);
   const modelSetting = tabs[0].containerEl.children.find((child) => child.name === 'Codex model');
   assert.deepEqual([...modelSetting.dropdown.options], [
-    ['saved-model', 'saved-model (saved model)'], ['gpt-5.5', 'gpt-5.5'],
+    ['saved-model', 'saved-model (saved)'], ['gpt-5.5', 'gpt-5.5'],
   ]);
   assert.equal(modelSetting.dropdown.value, 'saved-model');
   await modelSetting.dropdown.change('gpt-5.5');
@@ -919,7 +966,7 @@ test('settings automatically load Codex models, preserve the saved selection and
     'gpt-5.5');
 });
 
-test('connection test sends only its disclosed fixed prompt and reports success without saving a response', async () => {
+test('connection test sends only its fixed prompt and reports success without saving a response', async () => {
   const secrets = new Map([['prism-codex-credential', JSON.stringify({
     accessToken: 'test-access', refreshToken: 'test-refresh', accountId: 'account-1',
     expiresAt: Date.now() + 3600_000,
@@ -927,8 +974,8 @@ test('connection test sends only its disclosed fixed prompt and reports success 
   const { plugin, tabs, requests, writes, notices } = await loadPlugin(null, false, secrets);
   await plugin.setLlmConnection('chatgpt-codex');
   tabs[0].display();
-  const setting = tabs[0].containerEl.children.find((child) => child.name === 'Test ChatGPT connection');
-  assert.match(setting.description, /Reply with OK.*chatgpt\.com\/backend-api\/codex\/responses/);
+  const setting = tabs[0].containerEl.children.find((child) => child.name === 'Connection test');
+  assert.equal(setting.description, 'Sends only “Reply with OK.” to chatgpt.com.');
   assert.equal(setting.button.disabled, false);
   await setting.button.click();
   const sent = requests.filter((request) => request.url.includes('/codex/responses'));
@@ -936,14 +983,14 @@ test('connection test sends only its disclosed fixed prompt and reports success 
   assert.deepEqual(structuredClone(JSON.parse(sent[0].body).input), [{ role: 'user', content: 'Reply with OK.' }]);
   assert.equal(requests.some((request) => request.url === 'https://api.openai.com/v1/responses'), false);
   assert.equal(tabs[0].containerEl.children.find((child) => child.attributes?.role === 'status').text,
-    'Success: ChatGPT (Codex) responded to the connection test.');
-  assert.ok(notices.includes('Success: ChatGPT (Codex) responded to the connection test.'));
+    'Connection successful.');
+  assert.ok(notices.includes('Connection successful.'));
   assert.doesNotMatch(JSON.stringify(writes), /test-access|test-refresh|Reply with OK|Connection succeeded/);
 });
 
-test('connection test shows safe failure categories and disables the button without OAuth credentials', async () => {
-  for (const [status, expected] of [[401, /Authentication failed/], [403, /not permitted/],
-    [429, /rate limited/], [503, /unavailable/]]) {
+test('connection test shows concise safe failures and disables the button without OAuth credentials', async () => {
+  for (const [status, expected] of [[401, 'Failed: Reconnect ChatGPT.'], [403, 'Failed: Choose another model.'],
+    [429, 'Failed: Check account usage or retry later.'], [503, 'Failed: Check the network and retry.']]) {
     const secrets = new Map([['prism-codex-credential', JSON.stringify({
       accessToken: 'test-access', refreshToken: 'test-refresh', accountId: 'account-1',
       expiresAt: Date.now() + 3600_000,
@@ -952,16 +999,15 @@ test('connection test shows safe failure categories and disables the button with
       (request) => request.url.includes('/codex/responses') ? { status, text: 'private token and note' } : undefined);
     await plugin.setLlmConnection('chatgpt-codex');
     tabs[0].display();
-    await tabs[0].containerEl.children.find((child) => child.name === 'Test ChatGPT connection').button.click();
+    await tabs[0].containerEl.children.find((child) => child.name === 'Connection test').button.click();
     const message = tabs[0].containerEl.children.find((child) => child.attributes?.role === 'status').text;
-    assert.match(message, /^Failed:/);
-    assert.match(message, expected);
+    assert.equal(message, expected);
     assert.ok(notices.includes(message));
     assert.doesNotMatch(message, /private token and note|test-access|account-1/);
   }
   const missing = await loadPlugin({ llmConnection: 'chatgpt-codex' });
   missing.tabs[0].display();
-  assert.equal(missing.tabs[0].containerEl.children.find((child) => child.name === 'Test ChatGPT connection').button.disabled, true);
+  assert.equal(missing.tabs[0].containerEl.children.find((child) => child.name === 'Connection test').button.disabled, true);
   assert.equal(missing.requests.length, 0);
 });
 
@@ -978,17 +1024,17 @@ test('sign-out during a connection test discards its late result and prevents du
       ? new Promise((resolve) => { finish = resolve; started(); }) : undefined);
   await plugin.setLlmConnection('chatgpt-codex');
   tabs[0].display();
-  const first = tabs[0].containerEl.children.find((child) => child.name === 'Test ChatGPT connection').button;
+  const first = tabs[0].containerEl.children.find((child) => child.name === 'Connection test').button;
   const pending = first.click();
   await requestStarted;
-  assert.equal(tabs[0].containerEl.children.find((child) => child.name === 'Test ChatGPT connection').button.disabled, true);
+  assert.equal(tabs[0].containerEl.children.find((child) => child.name === 'Connection test').button.disabled, true);
   await first.click();
   assert.equal(requests.filter((request) => request.url.includes('/codex/responses')).length, 1);
   tabs[0].containerEl.children.find((child) => child.name === 'ChatGPT account').buttons[1].click();
   finish({ status: 200, text: 'data: {"type":"response.output_text.delta","delta":"OK"}\n\ndata: {"type":"response.completed"}\n\n' });
   await pending;
   assert.equal(tabs[0].containerEl.children.find((child) => child.attributes?.role === 'status'), undefined);
-  assert.equal(tabs[0].containerEl.children.find((child) => child.name === 'Test ChatGPT connection').button.disabled, true);
+  assert.equal(tabs[0].containerEl.children.find((child) => child.name === 'Connection test').button.disabled, true);
 });
 
 test('Ask view validates input, shows loading and safe errors, then renders answer as text', async () => {
@@ -1304,7 +1350,7 @@ test('Advanced exclusion rules remove indexed data and block create, rebuild, an
   assert.equal((await plugin.answerQuery('Confidential')).citations.length, 0);
   assert.equal(requests.length, 0);
   assert.equal(privateFile.content, '# Confidential material');
-  assert.match(notices.at(-1), /exclusions applied/);
+  assert.equal(notices.at(-1), 'Exclusions applied.');
   const restarted = await loadPlugin(writes.at(-1));
   assert.deepEqual(structuredClone(restarted.plugin.settings.excludedPaths), ['Private']);
   await assert.rejects(plugin.setExcludedPaths('../outside.md'), /Vault-relative/);
@@ -1416,9 +1462,9 @@ test('Advanced settings shows index counts and rebuilds from Vault Markdown', as
   const advanced = children.findIndex((child) => child.tag === 'h3' && child.text === 'Advanced');
   const status = children.findIndex((child) => child.name === 'Index status');
   assert.ok(status > advanced);
-  assert.match(children[status].description, /ready\. 0 sources, 0 chunks/);
+  assert.match(children[status].description, /ready · 0 sources · 0 chunks/);
   const rebuild = children.find((child) => child.name === 'Rebuild index');
-  assert.match(rebuild.description, /No Vault text is sent for indexing/);
+  assert.match(rebuild.description, /no Vault text is sent/);
   assert.equal(rebuild.button.disabled, false);
   await rebuild.button.click();
   const { lastRebuildMs, ...counts } = structuredClone(plugin.getIndexStatus());
@@ -1426,7 +1472,7 @@ test('Advanced settings shows index counts and rebuilds from Vault Markdown', as
   assert.ok(Number.isFinite(lastRebuildMs) && lastRebuildMs >= 0);
   assert.match(notices.at(-1), /rebuilt from Vault Markdown/);
   const updated = tabs[0].containerEl.children.find((child) => child.name === 'Index status');
-  assert.match(updated.description, /ready\. 1 sources, 1 chunks/);
+  assert.match(updated.description, /ready · 1 sources · 1 chunks/);
   assert.equal(file.content, '# Vault note');
 });
 
@@ -1492,7 +1538,7 @@ test('failed search mode save keeps full-text enabled', async () => {
   await consent.dropdown.change('local');
   assert.equal(plugin.settings.searchMode, 'full-text');
   assert.equal(consent.dropdown.value, 'full-text');
-  assert.match(notices[0], /Could not save search method/);
+  assert.equal(notices[0], 'Could not save; retry.');
   assert.equal(requests.length, 0);
 });
 
@@ -1508,21 +1554,24 @@ test('built plugin loads and opens a settings tab with the default Vault notice'
   assert.ok(listeners.has('rename'));
   assert.ok(listeners.has('delete'));
   tabs[0].display();
-  assert.equal(tabs[0].containerEl.children[0].toggle.value, true);
-  assert.match(tabs[0].containerEl.children[1].text, /Markdown/);
+  assert.equal(tabs[0].containerEl.children.find((child) => child.name === 'Vault reminder').toggle.value, true);
+  assert.match(visibleText(tabs[0].containerEl), /Vault Markdown is the source of truth/);
+  assert.match(visibleText(tabs[0].containerEl), /Answers send questions, history and retrieved note text to api\.openai\.com/);
 });
 
 test('changing the notice persists and is restored after restart', async () => {
   const first = await loadPlugin(null);
   first.tabs[0].display();
-  await first.tabs[0].containerEl.children[0].toggle.change(false);
+  await first.tabs[0].containerEl.children.find((child) => child.name === 'Vault reminder').toggle.change(false);
   assert.deepEqual(first.writes, [{ showVaultNotice: false }]);
-  assert.equal(first.tabs[0].containerEl.children.some((child) => child.text?.includes?.('source of truth')), false);
+  assert.doesNotMatch(visibleText(first.tabs[0].containerEl), /Vault Markdown is the source of truth/);
+  assert.match(visibleText(first.tabs[0].containerEl), /Answers send questions, history and retrieved note text/);
 
   const restarted = await loadPlugin(first.writes[0]);
   restarted.tabs[0].display();
-  assert.equal(restarted.tabs[0].containerEl.children[0].toggle.value, false);
-  assert.equal(restarted.tabs[0].containerEl.children.some((child) => child.text?.includes?.('source of truth')), false);
+  assert.equal(restarted.tabs[0].containerEl.children.find((child) => child.name === 'Vault reminder').toggle.value, false);
+  assert.doesNotMatch(visibleText(restarted.tabs[0].containerEl), /Vault Markdown is the source of truth/);
+  assert.match(visibleText(restarted.tabs[0].containerEl), /Answers send questions, history and retrieved note text/);
 });
 
 test('invalid saved settings fall back to the default', async () => {
@@ -1537,11 +1586,11 @@ test('invalid saved settings fall back to the default', async () => {
 test('failed save keeps the previous setting and reports the error', async () => {
   const { plugin, tabs, notices } = await loadPlugin(null, true);
   tabs[0].display();
-  const toggle = tabs[0].containerEl.children[0].toggle;
+  const toggle = tabs[0].containerEl.children.find((child) => child.name === 'Vault reminder').toggle;
   await toggle.change(false);
   assert.equal(plugin.settings.showVaultNotice, true);
   assert.equal(toggle.value, true);
-  assert.match(notices[0], /could not save/);
+  assert.equal(notices[0], 'Could not save; retry.');
 });
 
 test('source registry records survive restart alongside settings', async () => {
@@ -1573,16 +1622,295 @@ test('chunk registry persists alongside sources and settings', async () => {
   assert.deepEqual(structuredClone(restarted.plugin.chunkRegistry.get('chunk-1')), chunk);
 });
 
-test('provider models persist and remote data transmission is disclosed', async () => {
+test('provider models persist after reload', async () => {
   const first = await loadPlugin(null);
   first.tabs[0].display();
   const children = first.tabs[0].containerEl.children;
-  const disclosure = children.find((child) => typeof child.text === 'string' && child.text.includes('Remote processing'));
-  assert.match(disclosure.text, /Search indexing and query embeddings run on this device/);
-  assert.match(disclosure.text, /query, up to 6 recent question\/answer pairs.*plus retrieved source IDs, chunk IDs, and text/);
   await children.find((child) => child.name === 'LLM model').text.change('text-model');
   const restarted = await loadPlugin(first.writes.at(-1));
   assert.equal(restarted.plugin.settings.llmModel, 'text-model');
+});
+
+test('settings show one concise privacy sentence for the selected destination with reminder off', async () => {
+  const { plugin, tabs, writes, requests } = await loadPlugin({ showVaultNotice: false });
+  const tab = tabs[0];
+  const destinations = new Map([
+    ['api-key', 'api.openai.com'],
+    ['chatgpt-codex', 'chatgpt.com'],
+    ['github-copilot', 'GitHub Copilot'],
+  ]);
+
+  for (const [connection, destination] of destinations) {
+    await plugin.setLlmConnection(connection);
+    const writesAfterSelection = writes.length;
+    tab.display();
+    assert.equal(tab.containerEl.children.find((child) => child.name === 'Vault reminder').toggle.value, false);
+    const privacy = tab.containerEl.children.find((child) => child.tag === 'p' &&
+      visibleText(child).startsWith('Answers send'));
+    assert.equal(visibleText(privacy),
+      `Answers send questions, history and retrieved note text to ${destination}.`);
+    assert.equal(findElement(tab.containerEl, (child) => child.tag === 'details'), undefined);
+    assert.equal(writes.length, writesAfterSelection);
+    assert.equal(requests.length, 0);
+  }
+});
+
+test('settings icons are decorative, concise, and controls have named non-orphaned descriptions', async () => {
+  const assertSettingsAccessible = (containerEl, expectedNames) => {
+    assert.equal(findElement(containerEl, (child) => child.tag === 'details'), undefined);
+    const rows = containerEl.children.filter((child) => expectedNames.includes(child.name));
+    assert.deepEqual(rows.map((row) => row.name).sort(), [...expectedNames].sort());
+
+    for (const row of rows) {
+      const icon = row.nameEl.children.find((child) => child.tag === 'span');
+      assert.ok(icon, `${row.name} has an adjacent icon`);
+      assert.equal(icon.attributes['aria-hidden'], 'true');
+      assert.equal(icon.attributes.focusable, 'false');
+      assert.ok(icon.attributes['data-icon']);
+      assert.equal(row.nameEl.textContent, row.name);
+      if (row.description) {
+        assert.ok(row.description.length <= 120, `${row.name} copy is concise`);
+        assert.ok(row.descEl.id);
+        assert.equal(row.descEl.textContent, row.description);
+      } else {
+        assert.equal(row.descEl.id, undefined, `${row.name} has no ghost description id`);
+        assert.equal(row.descEl.textContent, '');
+      }
+
+      for (const component of row.components) {
+        const namedControl = component.inputEl ?? component.selectEl ?? component.toggleEl;
+        if (namedControl) {
+          assert.equal(namedControl.attributes['aria-label'], row.name);
+          assert.equal(namedControl.attributes['aria-describedby'], row.description ? row.descEl.id : undefined);
+        }
+        if (component.buttonEl) {
+          const ariaLabel = component.buttonEl.getAttribute('aria-label');
+          const describedBy = component.buttonEl.getAttribute('aria-describedby');
+          if (component.icon) {
+            assert.equal(component.buttonEl.textContent, '', `${row.name} icon action has no redundant text`);
+            assert.equal(component.buttonEl.attributes['data-icon'], component.icon);
+            assert.ok(ariaLabel, `${row.name} icon action has an accessible name`);
+            assert.equal(component.tooltip, ariaLabel, `${row.name} hover tooltip matches its accessible name`);
+            assert.ok(ariaLabel.length <= 120, `${row.name} tooltip is concise`);
+          } else {
+            assert.ok(component.buttonEl.textContent.trim() || ariaLabel,
+              `${row.name} button has visible or accessible text`);
+            if (component.tooltip) assert.equal(component.tooltip, ariaLabel);
+          }
+          if (row.description && !component.buttonEl.getAttribute('aria-description')) {
+            assert.equal(describedBy, row.descEl.id);
+          } else {
+            assert.equal(describedBy, null, `${row.name} has no ghost aria-describedby`);
+          }
+          if (component.icon === 'download') {
+            assert.match(ariaLabel, /~129 MiB.*huggingface\.co\/CDN\/Xet.*high RAM.*no Vault text/);
+            assert.equal(component.buttonEl.getAttribute('aria-description'), ariaLabel);
+          }
+        }
+      }
+    }
+    assert.doesNotMatch(allText(containerEl),
+      /Model details & diagnostics|CLI authentication details|Sign-in help|MiniLM-L12-v2|Apache-2\.0|12,000 UTF-8 bytes/);
+    for (const paragraph of containerEl.children.filter((child) => child.tag === 'p')) {
+      assert.ok(visibleText(paragraph).length <= 120, 'visible status copy is concise');
+    }
+  };
+
+  const api = await loadPlugin(null);
+  api.tabs[0].display();
+  const apiRows = api.tabs[0].containerEl.children.filter((child) => typeof child.name === 'string' && child.name);
+  assert.ok(apiRows.length > 0);
+  assertSettingsAccessible(api.tabs[0].containerEl, apiRows.map((row) => row.name));
+
+  const codexSecrets = new Map([['prism-codex-credential', JSON.stringify({
+    accessToken: 'test-access', refreshToken: 'test-refresh', accountId: 'account-1',
+    expiresAt: Date.now() + 3600_000,
+  })]]);
+  const codex = await loadPlugin({ llmConnection: 'chatgpt-codex' }, false, codexSecrets);
+  await codex.plugin.refreshCodexModels(true);
+  codex.tabs[0].display();
+  assertSettingsAccessible(codex.tabs[0].containerEl, [
+    'ChatGPT account', 'Codex model', 'Codex models', 'Connection test',
+  ]);
+
+  const account = { host: 'github.com', login: 'copilot-user' };
+  const copilot = await loadPlugin({ llmConnection: 'github-copilot', copilotAccount: account,
+    copilotModel: 'copilot-model-fixture' });
+  copilot.plugin.manifest.dir = '.obsidian/plugins/prism';
+  const harness = createCopilotRuntime({ account });
+  copilot.plugin.copilotRuntime = harness.runtime;
+  await copilot.plugin.refreshCopilotModels(true);
+  copilot.tabs[0].display();
+  assertSettingsAccessible(copilot.tabs[0].containerEl, [
+    'GitHub account', 'Copilot model', 'Copilot models', 'Connection test',
+  ]);
+  const disconnect = copilot.tabs[0].containerEl.children.find((row) => row.name === 'GitHub account')
+    .buttons.find((button) => button.label === 'Disconnect Prism');
+  assert.equal(disconnect.buttonEl.textContent, 'Disconnect Prism');
+  assert.equal(disconnect.buttonEl.getAttribute('aria-label'),
+    'Disconnect Prism without signing out of the CLI.');
+  assert.ok(disconnect.buttonEl.getAttribute('aria-label').startsWith(disconnect.buttonEl.textContent));
+  assert.equal(disconnect.tooltip, disconnect.buttonEl.getAttribute('aria-label'));
+});
+
+test('Codex authorization keeps its code, sign-in link and named cancel icon visible', async () => {
+  const { plugin, tabs, requests, writes, storedSecrets, modals } = await loadPlugin({ llmConnection: 'chatgpt-codex' });
+  const secretsBefore = new Map(storedSecrets);
+  let cancelled = false;
+  const prompt = {
+    userCode: 'ABCD-EFGH',
+    verificationUrl: 'https://auth.openai.com/codex/device',
+    complete: new Promise(() => {}),
+    cancel() { cancelled = true; },
+  };
+  plugin.startCodexLogin = async () => { plugin.codexPrompt = prompt; };
+
+  const container = tabs[0].containerEl;
+  const settingRows = () => container.children.filter((child) => child.tag === 'setting');
+  const assertNamedRows = () => {
+    const rows = settingRows();
+    assert.ok(rows.every((row) => typeof row.name === 'string' && row.name.trim()),
+      'every settings row has a nonempty name');
+    return rows;
+  };
+  tabs[0].display();
+  const rowsBeforeConnect = assertNamedRows();
+  const accountBeforeConnect = rowsBeforeConnect.find((child) => child.name === 'ChatGPT account');
+  assert.ok(accountBeforeConnect);
+  assert.equal(accountBeforeConnect.buttons.find((button) => button.label === 'Connect').disabled, false);
+  await accountBeforeConnect
+    .buttons.find((button) => button.label === 'Connect').click();
+
+  const rowsWhilePending = assertNamedRows();
+  assert.equal(rowsWhilePending.length, rowsBeforeConnect.length,
+    'pending authorization does not add a settings row');
+  assert.equal(findElement(container, (child) => child.tag === 'details'), undefined);
+  assert.equal(modals.length, 0);
+  assert.match(visibleText(container), /Enter code ABCD-EFGH/);
+  assert.match(visibleText(container), /Open sign-in/);
+  const link = container.children.find((child) => child.tag === 'a');
+  assert.ok(link);
+  assert.equal(link.href, prompt.verificationUrl);
+  assert.equal(link.attributes.target, '_blank');
+  const accountWhilePending = rowsWhilePending.find((child) => child.name === 'ChatGPT account');
+  assert.ok(accountWhilePending);
+  const cancelButton = accountWhilePending.buttons.find((button) =>
+    button.buttonEl.getAttribute('aria-label') === 'Cancel sign-in');
+  assert.ok(cancelButton, 'Cancel sign-in belongs to the named ChatGPT account row');
+  assert.equal(rowsWhilePending.some((row) => row !== accountWhilePending &&
+    row.buttons?.some((button) => button.buttonEl.getAttribute('aria-label') === 'Cancel sign-in')), false);
+  assert.equal(accountWhilePending.buttons.find((button) => button.label === 'Connect').disabled, true);
+  assert.equal(cancelButton.icon, 'x');
+  assert.equal(cancelButton.buttonEl.textContent, '');
+  assert.equal(cancelButton.tooltip, 'Cancel sign-in');
+  const describedBy = cancelButton.buttonEl.getAttribute('aria-describedby');
+  assert.ok(accountWhilePending.descEl.id);
+  assert.equal(describedBy, accountWhilePending.descEl.id);
+  assert.ok(findElement(container, (child) => child.id === describedBy), 'cancel description target exists');
+  assert.equal(container.children.includes(link), true);
+  assert.equal(requests.length, 0);
+  assert.equal(writes.length, 0);
+  assert.deepEqual(storedSecrets, secretsBefore);
+
+  await cancelButton.click();
+  assert.equal(cancelled, true);
+  assert.equal(plugin.getCodexStatus().prompt, undefined);
+  assert.doesNotMatch(visibleText(container), /Enter code ABCD-EFGH|Open sign-in/);
+  assert.equal(container.children.some((child) => child.tag === 'a'), false);
+  const rowsAfterCancel = assertNamedRows();
+  const accountAfterCancel = rowsAfterCancel.find((child) => child.name === 'ChatGPT account');
+  assert.ok(accountAfterCancel);
+  assert.equal(accountAfterCancel.buttons.some((button) =>
+    button.buttonEl.getAttribute('aria-label') === 'Cancel sign-in'), false);
+  assert.equal(accountAfterCancel.buttons.find((button) => button.label === 'Connect').disabled, false);
+  assert.equal(requests.length, 0);
+  assert.equal(writes.length, 0);
+  assert.deepEqual(storedSecrets, secretsBefore);
+  assert.equal(modals.length, 0);
+});
+
+test('local model status, download warning, success, cancellation and failure stay concise and safe', async () => {
+  const { plugin, tabs, notices, requests } = await loadPlugin(null);
+  plugin.localModel = { status: 'Not checked', busy: false, cancel() {} };
+  plugin.localEmbeddings = { metrics: { loadMs: 18.6, inferenceMs: 3.4, texts: 2, modelBytes: 1_572_864 } };
+  const downloadDescription = 'Download/repair ~129 MiB from huggingface.co/CDN/Xet (high RAM; mobile memory risk; no Vault text is sent).';
+  const localSetting = () => tabs[0].containerEl.children.find((child) => child.name === 'Local Embedding model');
+  const actions = () => localSetting().buttons;
+  const findAction = (icon) => actions().find((button) => button.icon === icon);
+  for (const [status, busy, expected] of [
+    ['Local model downloaded. Rebuild the index.', false, 'Ready'],
+    ['Download cancelled.', false, 'Cancelled'],
+    ['Model download failed. Check internet access and storage.', false, 'Download failed; check network and storage.'],
+    ['Runtime unavailable. Reinstall Prism.', false, 'Reinstall Prism to restore the runtime.'],
+    ['Not checked', false, 'Not checked'],
+    ['Downloading / checking model…', true, 'Downloading…'],
+  ]) {
+    plugin.localModel = { status, busy, cancel() {} };
+    tabs[0].display();
+    assert.equal(localSetting().description, expected);
+    assert.equal(findAction('download').disabled, busy);
+    assert.equal(findAction('x').disabled, !busy);
+  }
+
+  plugin.localModel = { status: 'Not checked', busy: false, cancel() {} };
+  tabs[0].display();
+  assert.equal(findAction('download').tooltip, downloadDescription);
+  assert.equal(findAction('download').buttonEl.getAttribute('aria-label'), downloadDescription);
+  assert.equal(findAction('download').buttonEl.getAttribute('aria-description'), downloadDescription);
+  assert.equal(findAction('download').buttonEl.getAttribute('aria-describedby'), null);
+  assert.equal(findAction('download').buttonEl.getAttribute('title'), null);
+  assert.equal(findAction('download').buttonEl.textContent, '');
+  assert.equal(findAction('x').buttonEl.getAttribute('aria-label'), 'Cancel download');
+  assert.doesNotMatch(allText(tabs[0].containerEl),
+    /MiniLM-L12-v2|Apache-2\.0|Load:|Inference:|Model \+ WASM buffers/);
+
+  plugin.downloadLocalModel = async () => { plugin.localModel.status = 'Local model downloaded.'; };
+  await findAction('download').click();
+  assert.equal(notices.at(-1), 'Model ready; rebuild the index.');
+
+  plugin.localModel = {
+    status: 'Not checked', busy: false,
+    cancel() { this.status = 'Download cancelled.'; rejectDownload(new Error('private cancellation detail')); },
+  };
+  let rejectDownload;
+  plugin.downloadLocalModel = () => {
+    const model = plugin.localModel;
+    model.status = 'Downloading / checking model…';
+    model.busy = true;
+    tabs[0].display();
+    return new Promise((_resolve, reject) => { rejectDownload = reject; }).finally(() => {
+      model.busy = false;
+      tabs[0].display();
+    });
+  };
+  tabs[0].display();
+  assert.equal(findAction('download').disabled, false);
+  assert.equal(findAction('x').disabled, true);
+  const beforeCancelNotices = notices.length;
+  const pendingDownload = findAction('download').click();
+  assert.equal(plugin.localModel.busy, true);
+  assert.equal(findAction('download').disabled, true);
+  assert.equal(findAction('x').disabled, false);
+  await findAction('x').click();
+  await pendingDownload;
+  assert.equal(notices.length, beforeCancelNotices);
+  assert.doesNotMatch(notices.join('\n'), /private cancellation detail/);
+  tabs[0].display();
+  assert.equal(localSetting().description, 'Cancelled');
+
+  plugin.localModel = { status: 'Model download failed. Check network.', busy: false, cancel() {} };
+  plugin.downloadLocalModel = async () => { throw new Error('private network response'); };
+  tabs[0].display();
+  await findAction('download').click();
+  assert.equal(notices.at(-1), 'Download failed; check network and storage.');
+  assert.doesNotMatch(notices.at(-1), /private network response/);
+
+  plugin.localModel = undefined;
+  tabs[0].display();
+  assert.equal(localSetting().description, 'Reinstall Prism to restore the runtime.');
+  await findAction('download').click();
+  assert.equal(notices.at(-1), 'Download failed; check network and storage.');
+  assert.equal(requests.length, 0);
 });
 
 test('API keys use Secret Storage and are never shown or saved as plugin data', async () => {
@@ -1623,7 +1951,7 @@ test('automatic model failure and empty response stop retries until manual refre
     assert.equal(requests.filter((request) => request.url.includes('/codex/models')).length, 1);
     assert.equal(setting('Codex model').text, undefined);
     assert.equal(setting('Codex model').dropdown.value, 'saved');
-    assert.match(setting('Codex models').description, /Could not load/);
+    assert.equal(setting('Codex models').description, 'Models unavailable; refresh to retry.');
     assert.doesNotMatch(setting('Codex models').description, /private response|test-access/);
     assert.equal(plugin.settings.codexModel, 'saved');
     response = { status: 200, text: JSON.stringify({ models: [{ slug: 'fresh', visibility: 'list' }] }) };
@@ -1655,7 +1983,9 @@ test('model loading disables duplicate refresh and does not redraw hidden or sig
     tabs[0].display();
     await new Promise(setImmediate);
     const settings = tabs[0].containerEl;
-    const button = settings.children.find((child) => child.name === 'Codex models').button;
+    const models = settings.children.find((child) => child.name === 'Codex models');
+    const button = models.button;
+    assert.equal(models.description, 'Loading…');
     assert.equal(button.disabled, true);
     await button.click();
     tabs[0].display();
@@ -1831,7 +2161,7 @@ test('Check CLI login explains how to install a CLI that cannot be auto-detected
   assert.equal(checkButton.disabled ?? false, false);
   await checkButton.click();
 
-  assert.equal(notices.at(-1), 'Could not find or start a compatible Copilot CLI. Install it, add it to PATH, restart Obsidian if it is not on PATH, then click Check CLI login again.');
+  assert.equal(notices.at(-1), 'Install Copilot CLI on PATH and restart Obsidian.');
   assert.equal(harness.calls.getAuthStatus.length, 1);
   assert.equal(Object.hasOwn(harness.calls.getAuthStatus[0], 'cliPath'), false);
   assert.equal(harness.calls.listModels.length, 0);
@@ -1842,13 +2172,13 @@ test('Check CLI login explains how to install a CLI that cannot be auto-detected
 
 test('Check CLI login shows fixed stage guidance without exposing runtime details', async () => {
   const expectedNotices = {
-    sidecar_load: 'Prism could not load its GitHub Copilot runtime. Update or reinstall Prism, then restart Obsidian.',
-    cli_discovery: 'Could not find or start a compatible Copilot CLI. Install it, add it to PATH, restart Obsidian if it is not on PATH, then click Check CLI login again.',
-    workspace: 'Prism could not prepare the temporary GitHub Copilot workspace. Check that local temporary storage is available, then try again.',
-    cli_start: 'Prism found a Copilot CLI but could not start its SDK connection. Check the CLI installation and restart Obsidian, then try again.',
-    auth_status: 'Copilot CLI started, but Prism could not read its login status. Update the GitHub Copilot CLI, then check again.',
-    identity: 'No GitHub.com Copilot CLI OAuth login was found. Run copilot login in a terminal, then check again.',
-    cleanup: 'Prism could not finish cleaning up GitHub Copilot CLI resources. Restart Obsidian, then try again.',
+    sidecar_load: 'Reinstall Prism and restart Obsidian.',
+    cli_discovery: 'Install Copilot CLI on PATH and restart Obsidian.',
+    workspace: 'Check temporary storage and retry.',
+    cli_start: 'Repair Copilot CLI and restart Obsidian.',
+    auth_status: 'Update Copilot CLI and check again.',
+    identity: 'Run copilot login, then check CLI login.',
+    cleanup: 'Restart Obsidian and retry.',
   };
   const codes = {
     sidecar_load: 'unavailable', cli_discovery: 'invalid_request', workspace: 'unavailable',
@@ -1890,7 +2220,7 @@ test('Check CLI login shows fixed stage guidance without exposing runtime detail
   tabs[0].display();
   const malformedSetting = tabs[0].containerEl.children.find((item) => item.name === 'GitHub account');
   await malformedSetting.buttons.find((button) => button.label === 'Check CLI login').click();
-  assert.equal(notices.at(-1), 'Prism could not check the GitHub Copilot CLI login. Verify the CLI installation and login, then try again.');
+  assert.equal(notices.at(-1), 'Check Copilot CLI login and retry.');
   assert.doesNotMatch(notices.at(-1), /private|diagnostic/);
 });
 
@@ -1922,8 +2252,8 @@ test('pathless Check CLI login and Copilot model/test actions work', async () =>
 
   const settings = tabs[0].containerEl.children;
   const modelSetting = settings.find((item) => item.name === 'Copilot models');
-  const refreshButton = modelSetting.buttons.find((button) => button.label === 'Refresh models');
-  const testSetting = settings.find((item) => item.name === 'Test GitHub Copilot connection');
+  const refreshButton = modelSetting.buttons.find((button) => button.icon === 'refresh-cw');
+  const testSetting = settings.find((item) => item.name === 'Connection test');
   const testButton = testSetting.buttons.find((button) => button.label === 'Test connection');
   assert.equal(settings.some((item) => item.name === 'GitHub Copilot CLI path (optional)'), false);
   assert.equal(refreshButton.disabled ?? false, false);
@@ -1938,7 +2268,7 @@ test('pathless Check CLI login and Copilot model/test actions work', async () =>
     assert.equal(Object.hasOwn(request, 'cliPath'), false);
     assert.equal(Object.hasOwn(request, 'token'), false);
   }
-  assert.ok(notices.includes('Success: GitHub Copilot responded to the connection test.'));
+  assert.ok(notices.includes('Connection successful.'));
   assert.equal(requests.length, 0);
 });
 
@@ -2064,7 +2394,11 @@ test('Copilot remains gated on mobile without loading the runtime or falling bac
   const settings = tabs[0].containerEl.children;
 
   assert.ok(settings.find((item) => item.name === 'LLM connection').dropdown.options.has('github-copilot'));
-  assert.ok(settings.some((item) => item.tag === 'p' && /Desktop only/.test(item.text)));
+  assert.equal(settings.find((item) => item.name === 'Copilot model').description, 'Desktop only');
+  assert.ok(settings.some((item) => item.tag === 'p' &&
+    visibleText(item) === 'GitHub Copilot requires Desktop; choose another connection.'));
+  assert.equal(settings.some((item) => item.tag === 'p' && visibleText(item).startsWith('Answers send')), false);
+  assert.ok(settings.some((item) => item.name === 'LLM API key'));
   assert.equal(settings.some((item) => item.name === 'GitHub account'), false);
   await assert.rejects(plugin.checkCopilotLogin(), (error) => error.code === 'unavailable');
   await assert.rejects(plugin.refreshCopilotModels(), (error) => error.code === 'unavailable');
@@ -2098,7 +2432,7 @@ test('Copilot Ask and connection test send the selected model and intended conte
   await plugin.refreshCopilotModels(true);
 
   tabs[0].display();
-  const testSetting = tabs[0].containerEl.children.find((item) => item.name === 'Test GitHub Copilot connection');
+  const testSetting = tabs[0].containerEl.children.find((item) => item.name === 'Connection test');
   await plugin.testCopilotConnection();
   const connectionTest = harness.calls.generate.at(-1);
   assert.equal(connectionTest.modelId, 'copilot-model-fixture');
@@ -2107,7 +2441,7 @@ test('Copilot Ask and connection test send the selected model and intended conte
   assert.equal(connectionTest.context.length, 0);
   assert.equal(Object.hasOwn(connectionTest, 'token'), false);
   assert.ok(testSetting.description.includes('Reply with OK.'));
-  assert.match(testSetting.description, /No Vault content or chat history is sent/);
+  assert.equal(testSetting.description, 'Sends only “Reply with OK.” to GitHub Copilot.');
 
   const file = new MockTFile('copilot-fact.md', '# Moonlight\nMoonlight is a local RAG fixture.');
   plugin.app.vault.files = [file];

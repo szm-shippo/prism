@@ -1,4 +1,4 @@
-import { FileSystemAdapter, Notice, Platform, Plugin, PluginSettingTab, Setting, TFile } from 'obsidian';
+import { ButtonComponent, FileSystemAdapter, Notice, Platform, Plugin, PluginSettingTab, Setting, setIcon, TFile } from 'obsidian';
 import { CitationAnswerer, type CitedAnswer, type SourceCitation } from '../core/application/citation-answerer';
 import { RagPipeline } from '../core/application/rag-pipeline';
 import type { ConversationExchange } from '../core/application/conversation-history';
@@ -36,13 +36,13 @@ function joinDesktopPath(root: string, directory: string, filename: string): str
 }
 
 const COPILOT_LOGIN_STAGE_NOTICES: Record<CopilotRuntimeErrorStage, string> = {
-  sidecar_load: 'Prism could not load its GitHub Copilot runtime. Update or reinstall Prism, then restart Obsidian.',
-  cli_discovery: 'Could not find or start a compatible Copilot CLI. Install it, add it to PATH, restart Obsidian if it is not on PATH, then click Check CLI login again.',
-  workspace: 'Prism could not prepare the temporary GitHub Copilot workspace. Check that local temporary storage is available, then try again.',
-  cli_start: 'Prism found a Copilot CLI but could not start its SDK connection. Check the CLI installation and restart Obsidian, then try again.',
-  auth_status: 'Copilot CLI started, but Prism could not read its login status. Update the GitHub Copilot CLI, then check again.',
-  identity: 'No GitHub.com Copilot CLI OAuth login was found. Run copilot login in a terminal, then check again.',
-  cleanup: 'Prism could not finish cleaning up GitHub Copilot CLI resources. Restart Obsidian, then try again.',
+  sidecar_load: 'Reinstall Prism and restart Obsidian.',
+  cli_discovery: 'Install Copilot CLI on PATH and restart Obsidian.',
+  workspace: 'Check temporary storage and retry.',
+  cli_start: 'Repair Copilot CLI and restart Obsidian.',
+  auth_status: 'Update Copilot CLI and check again.',
+  identity: 'Run copilot login, then check CLI login.',
+  cleanup: 'Restart Obsidian and retry.',
 };
 
 function copilotLoginFailureNotice(error: unknown): string {
@@ -61,7 +61,7 @@ function copilotLoginFailureNotice(error: unknown): string {
   if (error instanceof LLMProviderError && error.code === 'invalid_request') {
     return COPILOT_LOGIN_STAGE_NOTICES.cli_discovery;
   }
-  return 'Prism could not check the GitHub Copilot CLI login. Verify the CLI installation and login, then try again.';
+  return 'Check Copilot CLI login and retry.';
 }
 
 export default class PrismPlugin extends Plugin {
@@ -82,7 +82,6 @@ export default class PrismPlugin extends Plugin {
   private copilotProviders = new Set<CopilotLLMProvider>();
   private copilotModels: CopilotModelInfo[] = [];
   private copilotModelState: 'idle' | 'loading' | 'ready' | 'error' = 'idle';
-  private copilotModelError?: string;
   private copilotModelLoad?: Promise<void>;
   private copilotGeneration = 0;
   private copilotRuntime?: CopilotSdkRuntime;
@@ -329,7 +328,6 @@ export default class PrismPlugin extends Plugin {
     if (resetCatalog) {
       this.copilotModels = [];
       this.copilotModelState = 'idle';
-      this.copilotModelError = undefined;
     }
   }
 
@@ -350,10 +348,9 @@ export default class PrismPlugin extends Plugin {
     account?: CopilotAccount;
     models: readonly CopilotModelInfo[];
     modelState: 'idle' | 'loading' | 'ready' | 'error';
-    modelError?: string;
   } {
     return { account: this.settings.copilotAccount,
-      models: this.copilotModels, modelState: this.copilotModelState, modelError: this.copilotModelError };
+      models: this.copilotModels, modelState: this.copilotModelState };
   }
 
   async refreshCopilotModels(force = true): Promise<void> {
@@ -364,7 +361,6 @@ export default class PrismPlugin extends Plugin {
 
     const generation = this.copilotGeneration;
     this.copilotModelState = 'loading';
-    this.copilotModelError = undefined;
     const provider = this.createCopilotProvider('');
     this.copilotProviders.add(provider);
     const load = provider.listModels().then((models) => {
@@ -372,12 +368,7 @@ export default class PrismPlugin extends Plugin {
       this.copilotModels = models.filter((model) => model.id.trim() && model.name.trim() && model.policy?.state !== 'disabled');
       this.copilotModelState = 'ready';
     }, (error: unknown) => {
-      if (generation === this.copilotGeneration) {
-        this.copilotModelState = 'error';
-        this.copilotModelError = error instanceof LLMProviderError
-          ? `Could not load available GitHub Copilot models (${error.code}).`
-          : 'Could not load available GitHub Copilot models.';
-      }
+      if (generation === this.copilotGeneration) this.copilotModelState = 'error';
       throw error;
     }).finally(async () => {
       this.copilotProviders.delete(provider);
@@ -456,10 +447,9 @@ export default class PrismPlugin extends Plugin {
     }
   }
 
-  getCodexStatus(): { accountId?: string; prompt?: DevicePrompt; models: readonly string[]; modelState: 'idle' | 'loading' | 'ready' | 'error'; modelError?: string } {
+  getCodexStatus(): { accountId?: string; prompt?: DevicePrompt; models: readonly string[]; modelState: 'idle' | 'loading' | 'ready' | 'error' } {
     return { accountId: this.codexAuth?.accountId, prompt: this.codexPrompt,
-      models: this.codexAuth?.availableModels ?? [], modelState: this.codexAuth?.modelListState ?? 'idle',
-      modelError: this.codexAuth?.modelListError };
+      models: this.codexAuth?.availableModels ?? [], modelState: this.codexAuth?.modelListState ?? 'idle' };
   }
 
   async startCodexLogin(): Promise<void> {
@@ -637,9 +627,7 @@ export default class PrismPlugin extends Plugin {
   }
 
   getLocalModelStatus(): string {
-    const metrics = this.localEmbeddings?.metrics;
-    return `${this.localModel?.status ?? 'Runtime unavailable. Reinstall Prism.'}${metrics?.loadMs
-      ? ` Last load: ${Math.round(metrics.loadMs)} ms; inference: ${Math.round(metrics.inferenceMs)} ms / ${metrics.texts} texts; model + WASM buffers: ${(metrics.modelBytes / 1048576).toFixed(1)} MiB (not peak memory).` : ''}`;
+    return this.localModel?.status ?? 'Runtime unavailable. Reinstall Prism.';
   }
 
   localModelBusy(): boolean { return this.localModel?.busy ?? false; }
@@ -720,6 +708,7 @@ class PrismSettingTab extends PluginSettingTab {
   private visible = false;
   private activeConnectionTest?: object;
   private connectionTestResult?: string;
+  private settingsToLabel: Array<{ setting: Setting; name: string }> = [];
 
   constructor(private readonly prism: PrismPlugin) {
     super(prism.app, prism);
@@ -759,14 +748,91 @@ class PrismSettingTab extends PluginSettingTab {
     }
   }
 
+  private createSetting(container: HTMLElement, name: string, iconName: Parameters<typeof setIcon>[1],
+    description?: string): Setting {
+    const setting = new Setting(container).setName(name);
+    if (description) {
+      setting.setDesc(description);
+      setting.descEl.id = `prism-setting-${name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}-description`;
+    }
+    const icon = setting.nameEl.createSpan();
+    icon.setAttribute('aria-hidden', 'true');
+    icon.setAttribute('focusable', 'false');
+    setIcon(icon, iconName);
+    this.settingsToLabel.push({ setting, name });
+    return setting;
+  }
+
+  private setIconButton(button: ButtonComponent, icon: Parameters<typeof setIcon>[1],
+    tooltip: string, description?: string): void {
+    button.setIcon(icon).setTooltip(tooltip);
+    // Obsidian reads the tooltip from aria-label, so keep both strings identical.
+    button.buttonEl.setAttribute('aria-label', tooltip);
+    if (description) button.buttonEl.setAttribute('aria-description', description);
+  }
+
+  private localModelStatus(): string {
+    if (this.prism.localModelBusy()) return 'Downloading…';
+    const status = this.prism.getLocalModelStatus();
+    if (status.startsWith('Local model downloaded.')) return 'Ready';
+    if (status.startsWith('Download cancelled.')) return 'Cancelled';
+    if (status.startsWith('Model download failed.')) return 'Download failed; check network and storage.';
+    if (status.startsWith('Runtime unavailable.')) return 'Reinstall Prism to restore the runtime.';
+    if (status.startsWith('Downloading / checking ')) return 'Downloading…';
+    if (status.startsWith('Not checked')) return 'Not checked';
+    return 'Not checked';
+  }
+
+  private modelListStatus(state: 'idle' | 'loading' | 'ready' | 'error', count: number): string | undefined {
+    if (state === 'loading') return 'Loading…';
+    if (state === 'error') return 'Models unavailable; refresh to retry.';
+    return count ? undefined : 'No models available';
+  }
+
+  private addIconNotice(container: HTMLElement, iconName: Parameters<typeof setIcon>[1], text: string): void {
+    const notice = container.createEl('p');
+    const icon = notice.createSpan();
+    icon.setAttribute('aria-hidden', 'true');
+    icon.setAttribute('focusable', 'false');
+    setIcon(icon, iconName);
+    notice.createSpan({ text });
+  }
+
+  private associateSettingControls(): void {
+    for (const { setting, name } of this.settingsToLabel) {
+      const descriptionId = setting.descEl.id;
+      for (const component of setting.components) {
+        const controls = component as unknown as {
+          inputEl?: HTMLElement;
+          selectEl?: HTMLElement;
+          toggleEl?: HTMLElement;
+          buttonEl?: HTMLElement;
+        };
+        for (const control of [controls.inputEl, controls.selectEl, controls.toggleEl, controls.buttonEl]) {
+          if (!control) continue;
+          if (descriptionId && !control.getAttribute('aria-description')) {
+            control.setAttribute('aria-describedby', descriptionId);
+          }
+          if (control !== controls.buttonEl) control.setAttribute('aria-label', name);
+          else if (!control.getAttribute('aria-label') && !control.textContent?.trim()) {
+            control.setAttribute('aria-label', name);
+          }
+        }
+      }
+    }
+  }
+
   display(): void {
     this.visible = true;
     const { containerEl } = this;
+    this.settingsToLabel = [];
     containerEl.empty();
 
-    new Setting(containerEl)
-      .setName('Show Vault information')
-      .setDesc('Show a reminder that Vault Markdown is the source of truth.')
+    const connection = this.prism.settings.llmConnection;
+    const destination = connection === 'api-key' ? 'api.openai.com'
+      : connection === 'chatgpt-codex' ? 'chatgpt.com' : 'GitHub Copilot';
+
+    this.createSetting(containerEl, 'Vault reminder', 'info')
       .addToggle((toggle) => toggle
         .setValue(this.prism.settings.showVaultNotice)
         .onChange(async (value) => {
@@ -775,55 +841,61 @@ class PrismSettingTab extends PluginSettingTab {
             this.display();
           } catch {
             toggle.setValue(this.prism.settings.showVaultNotice);
-            new Notice('Prism could not save the setting. Try again.');
+            new Notice('Could not save; retry.');
           }
         }));
 
     if (this.prism.settings.showVaultNotice) {
-      containerEl.createEl('p', {
-        text: 'Prism uses Markdown in your Vault as its source of truth.',
-      });
+      this.addIconNotice(containerEl, 'info', 'Vault Markdown is the source of truth.');
     }
 
-    containerEl.createEl('p', {
-      text: 'Remote processing: Search indexing and query embeddings run on this device. For answers, your selected provider receives your query, up to 6 recent question/answer pairs (12,000 UTF-8 bytes), plus retrieved source IDs, chunk IDs, and text. OpenAI API-key answers go to api.openai.com; ChatGPT (Codex) answers go to chatgpt.com; GitHub Copilot uses the official Copilot SDK and your installed CLI. This data leaves your Vault for those requests.',
-    });
+    if (connection === 'github-copilot' && !Platform.isDesktopApp) {
+      this.addIconNotice(containerEl, 'plug', 'GitHub Copilot requires Desktop; choose another connection.');
+    } else {
+      this.addIconNotice(containerEl, 'shield',
+        `Answers send questions, history and retrieved note text to ${destination}.`);
+    }
 
-    new Setting(containerEl)
-      .setName('Search method')
-      .setDesc('Local full-text sends no search data. Local Embedding runs on this device. Changing method clears vectors; rebuild to include existing notes. Answers still send retrieved text to the selected LLM.')
+    this.createSetting(containerEl, 'Search method', 'search',
+      'Changing methods clears vectors and requires a rebuild.')
       .addDropdown((dropdown) => dropdown
         .addOption('full-text', 'Local full-text')
-        .addOption('local', 'Local Embedding (multilingual, WASM)')
+        .addOption('local', 'Local Embedding')
         .setValue(this.prism.settings.searchMode)
         .onChange(async (value) => {
           try {
             await this.prism.setSearchMode(value as PluginSettings['searchMode']);
-            new Notice('Search method changed. Rebuild the index for existing notes.');
+            new Notice('Search changed; rebuild the index.');
             this.display();
-          } catch (error) {
+          } catch {
             dropdown.setValue(this.prism.settings.searchMode);
             new Notice(this.prism.getIndexStatus().state === 'rebuilding'
-              ? 'Wait for the rebuild to finish before changing search method.' : 'Could not save search method. Try again.');
+              ? 'Wait for the rebuild to finish.' : 'Could not save; retry.');
           }
         }));
 
-    new Setting(containerEl)
-      .setName('Local Embedding model')
-      .setDesc(`Multilingual MiniLM-L12-v2, Apache-2.0, q8 / 384 dimensions. Download ~129 MiB from huggingface.co (redirects to Hugging Face CDN / Xet storage) for on-device search; no Vault text or questions are sent. Stored under the Prism plugin directory, models/. WASM runtime ships with Prism. Desktop, iOS and Android use a single-thread WASM worker; requires WASM SIMD and module workers. Loading can use hundreds of MiB to over 1 GiB; mobile may be slower or run out of memory. Real-device validation is pending. ${this.prism.getLocalModelStatus()}`)
-      .addButton((button) => button.setButtonText('Download / repair model')
-        .setDisabled(this.prism.localModelBusy())
-        .onClick(async () => {
-          try { await this.prism.downloadLocalModel(); new Notice('Local model ready. Rebuild the index.'); }
-          catch (error) { new Notice(error instanceof Error ? error.message : 'Could not download local model.'); }
-        }))
-      .addButton((button) => button.setButtonText('Cancel download')
-        .setDisabled(!this.prism.localModelBusy())
-        .onClick(() => this.prism.cancelLocalModelDownload()));
+    const downloadDescription = 'Download/repair ~129 MiB from huggingface.co/CDN/Xet (high RAM; mobile memory risk; no Vault text is sent).';
+    this.createSetting(containerEl, 'Local Embedding model', 'download', this.localModelStatus())
+      .addButton((button) => {
+        this.setIconButton(button, 'download', downloadDescription, downloadDescription);
+        button.setDisabled(this.prism.localModelBusy()).onClick(async () => {
+          try {
+            await this.prism.downloadLocalModel();
+            new Notice('Model ready; rebuild the index.');
+          } catch {
+            if (this.localModelStatus() !== 'Cancelled') {
+              new Notice('Download failed; check network and storage.');
+            }
+          }
+        });
+      })
+      .addButton((button) => {
+        this.setIconButton(button, 'x', 'Cancel download');
+        button.setDisabled(!this.prism.localModelBusy())
+          .onClick(() => this.prism.cancelLocalModelDownload());
+      });
 
-    new Setting(containerEl)
-      .setName('LLM connection')
-      .setDesc('Choose which account pays for answers. Prism never switches connections after an error.')
+    this.createSetting(containerEl, 'LLM connection', 'plug')
       .addDropdown((dropdown) => {
         dropdown.addOption('api-key', 'OpenAI API key')
           .addOption('chatgpt-codex', 'ChatGPT (Codex, experimental)');
@@ -838,47 +910,42 @@ class PrismSettingTab extends PluginSettingTab {
             this.display();
           } catch {
             this.display();
-            new Notice('Prism could not change the LLM connection on this device.');
+            new Notice('Could not change connection.');
           }
         });
       });
 
-    const codexModels = this.prism.getCodexStatus().models;
+    const codexStatus = this.prism.getCodexStatus();
+    const codexModels = codexStatus.models;
     const copilotStatus = this.prism.getCopilotStatus();
     const copilotModels = copilotStatus.models;
-    const connection = this.prism.settings.llmConnection;
-    const modelSetting = new Setting(containerEl)
-      .setName(connection === 'api-key' ? 'LLM model' : connection === 'chatgpt-codex' ? 'Codex model' : 'Copilot model')
-      .setDesc(connection === 'api-key' ? 'OpenAI model ID used for answers.'
-        : connection === 'github-copilot' ? copilotModels.length
-          ? 'Select a model returned by the official Copilot SDK. A saved model must remain listed for Ask to use it.'
-          : `The model list loads after connecting. Use Refresh models to retry; the saved model is retained. ${copilotStatus.modelError ?? ''}`
-        : codexModels.length ? 'Select a model returned for this account. Test the connection to verify access.'
-          : 'The model list loads when connected. Use Refresh models to retry; your saved model is retained.');
+    const modelName = connection === 'api-key' ? 'LLM model' : connection === 'chatgpt-codex' ? 'Codex model' : 'Copilot model';
+    const modelDescription = connection === 'github-copilot' && !Platform.isDesktopApp ? 'Desktop only' : undefined;
+    const modelSetting = this.createSetting(containerEl, modelName, 'bot', modelDescription);
     if (this.prism.settings.llmConnection === 'chatgpt-codex') {
       const selected = this.prism.settings.codexModel;
       modelSetting.addDropdown((dropdown) => {
         if (!selected) dropdown.addOption('', codexModels.length ? 'Choose a model' : 'No models available');
-        if (selected && !codexModels.includes(selected)) dropdown.addOption(selected, `${selected} (saved model)`);
+        if (selected && !codexModels.includes(selected)) dropdown.addOption(selected, `${selected} (saved)`);
         for (const model of codexModels) dropdown.addOption(model, model);
         dropdown.setValue(selected).onChange(async (value) => {
           try {
             await this.prism.setCodexModel(value);
             this.invalidateConnectionTest();
-          } catch { new Notice('Prism could not save the model. Try again.'); }
+          } catch { new Notice('Could not save model; retry.'); }
         });
       });
     } else if (connection === 'github-copilot' && Platform.isDesktopApp) {
       const selected = this.prism.settings.copilotModel;
       modelSetting.addDropdown((dropdown) => {
         if (!selected) dropdown.addOption('', copilotModels.length ? 'Choose a model' : 'No models available');
-        if (selected && !copilotModels.some((model) => model.id === selected)) dropdown.addOption(selected, `${selected} (saved model)`);
+        if (selected && !copilotModels.some((model) => model.id === selected)) dropdown.addOption(selected, `${selected} (saved)`);
         for (const model of copilotModels) dropdown.addOption(model.id, model.name);
         dropdown.setValue(selected).onChange(async (value) => {
           try {
             await this.prism.setCopilotModel(value);
             this.invalidateConnectionTest();
-          } catch { new Notice('Prism could not save the model. Try again.'); }
+          } catch { new Notice('Could not save model; retry.'); }
         });
       });
     } else if (connection === 'api-key') {
@@ -888,99 +955,91 @@ class PrismSettingTab extends PluginSettingTab {
         .onChange(async (value) => {
           try {
             await this.prism.setLlmModel(value);
-          } catch { new Notice('Prism could not save the model. Try again.'); }
+          } catch { new Notice('Could not save model; retry.'); }
         }));
     }
 
-    if (connection === 'github-copilot') {
-      if (!Platform.isDesktopApp) {
-        containerEl.createEl('p', {
-          text: 'GitHub Copilot is available on Obsidian Desktop only. On this device, Prism will not load the Copilot runtime or send requests; choose OpenAI API key or ChatGPT (Codex) to use an available connection.',
-        });
-      } else {
-        containerEl.createEl('p', {
-          text: 'GitHub Copilot uses the official SDK and a Copilot CLI executable you install. Run copilot login in a terminal and complete GitHub sign-in. Prism only accepts the stored GitHub.com Copilot CLI OAuth login; it does not use environment tokens, GitHub CLI authentication, or provider API keys. Prism stores only the verified host and login. Ask sends your question, recent conversation and retrieved Vault text to GitHub Copilot. The fixed connection test sends only “Reply with OK.” and no Vault content.',
-        });
-        const { account, modelState, modelError } = copilotStatus;
-        new Setting(containerEl)
-          .setName('GitHub account')
-          .setDesc(account ? `Connected to Prism as ${account.login} (${account.host}).`
-            : 'No GitHub Copilot CLI account is connected to Prism. Run copilot login in a terminal, then check again.')
-          .addButton((button) => button.setButtonText('Check CLI login')
-            .onClick(async () => {
-              try { await this.prism.checkCopilotLogin(); this.display(); }
-              catch (error) { new Notice(copilotLoginFailureNotice(error)); }
-            }))
-          .addButton((button) => button.setButtonText('Disconnect Prism')
-            .setDisabled(!account)
-            .onClick(async () => {
-              this.invalidateConnectionTest();
-              try { await this.prism.disconnectCopilot(); this.display(); }
-              catch { new Notice('Prism could not save the GitHub Copilot disconnection.'); }
-            }));
-        if (account) {
-          new Setting(containerEl).setName('Copilot models')
-            .setDesc(`The official SDK checks your saved GitHub.com CLI identity before loading model names. No Vault content or prompt is sent for this list. ${modelState === 'loading' ? 'Loading models...' : modelError ?? ''}`)
-            .addButton((button) => button.setButtonText(modelState === 'loading' ? 'Loading models...' : 'Refresh models')
-              .setDisabled(modelState === 'loading')
-              .onClick(() => this.loadCopilotModels(true)));
-          if (modelState === 'idle' && !copilotModels.length) {
-            void Promise.resolve().then(() => {
-              if (this.visible && this.prism.settings.llmConnection === 'github-copilot' &&
-                  this.prism.getCopilotStatus().modelState === 'idle') return this.loadCopilotModels(false);
-            });
-          }
+    if (connection === 'github-copilot' && Platform.isDesktopApp) {
+      const { account, modelState } = copilotStatus;
+      this.createSetting(containerEl, 'GitHub account', 'user', account
+        ? `Connected: ${account.login} (${account.host})`
+        : 'Run copilot login, then check CLI login.')
+        .addButton((button) => button.setButtonText('Check CLI login')
+          .onClick(async () => {
+            try { await this.prism.checkCopilotLogin(); this.display(); }
+            catch (error) { new Notice(copilotLoginFailureNotice(error)); }
+          }))
+        .addButton((button) => button.setButtonText('Disconnect Prism')
+          .setTooltip('Disconnect Prism without signing out of the CLI.')
+          .setDisabled(!account)
+          .onClick(async () => {
+            this.invalidateConnectionTest();
+            try { await this.prism.disconnectCopilot(); this.display(); }
+            catch { new Notice('Could not disconnect Prism; retry.'); }
+          }));
+      if (account) {
+        this.createSetting(containerEl, 'Copilot models', 'list',
+          this.modelListStatus(modelState, copilotModels.length))
+          .addButton((button) => {
+            this.setIconButton(button, 'refresh-cw', 'Refresh models');
+            button.setDisabled(modelState === 'loading')
+              .onClick(() => this.loadCopilotModels(true));
+          });
+        if (modelState === 'idle' && !copilotModels.length) {
+          void Promise.resolve().then(() => {
+            if (this.visible && this.prism.settings.llmConnection === 'github-copilot' &&
+                this.prism.getCopilotStatus().modelState === 'idle') return this.loadCopilotModels(false);
+          });
         }
-        new Setting(containerEl)
-          .setName('Test GitHub Copilot connection')
-          .setDesc(account
-            ? 'Sends only “Reply with OK.” to GitHub Copilot using the selected model. No Vault content or chat history is sent.'
-            : 'Check the GitHub Copilot CLI login before testing the connection.')
-          .addButton((button) => button.setButtonText(this.activeConnectionTest ? 'Testing...' : 'Test connection')
-            .setDisabled(!account || !this.prism.settings.copilotModel.trim() || Boolean(this.activeConnectionTest))
-            .onClick(async () => {
-              if (this.activeConnectionTest || !this.prism.getCopilotStatus().account) return;
-              const run = {};
-              this.activeConnectionTest = run;
-              this.connectionTestResult = undefined;
-              this.display();
-              let result: string;
-              try {
-                await this.prism.testCopilotConnection();
-                result = 'Success: GitHub Copilot responded to the connection test.';
-              } catch (error) {
-                const reason = error instanceof LLMProviderError
-                  ? ({ authentication: 'The CLI login changed or is unavailable. Run copilot login in a terminal, then click Check CLI login.',
-                      rate_limit: 'The account is rate limited. Try again later.',
-                      usage_limit: 'The account is rate limited or has reached its quota.',
-                      quota: 'The account has reached its usage quota.',
-                      context_limit: 'The request exceeds the model context limit.',
-                      unavailable: 'The Copilot service, CLI or network is unavailable. Verify the CLI installation and login, then try again.',
-                      invalid_request: 'The selected model or account was rejected, or the CLI could not be started. Install a compatible CLI, add it to PATH, and restart Obsidian if it is not on PATH.',
-                      unknown: 'The Copilot response was incomplete or invalid.' }[error.code])
-                  : 'Connection test could not run. Check the selected model and try again.';
-                result = `Failed: ${reason}`;
-              }
-              if (this.activeConnectionTest !== run ||
-                  this.prism.settings.llmConnection !== 'github-copilot') return;
-              this.activeConnectionTest = undefined;
-              this.connectionTestResult = result;
-              new Notice(result);
-              this.display();
-            }));
-        if (this.connectionTestResult) {
-          const result = containerEl.createEl('p', { text: this.connectionTestResult });
-          result.setAttr('role', 'status');
-        }
+      }
+      this.createSetting(containerEl, 'Connection test', 'plug', account
+        ? 'Sends only “Reply with OK.” to GitHub Copilot.'
+        : 'Check CLI login first.')
+        .addButton((button) => button.setButtonText(this.activeConnectionTest ? 'Testing…' : 'Test connection')
+          .setDisabled(!account || !this.prism.settings.copilotModel.trim() || Boolean(this.activeConnectionTest))
+          .onClick(async () => {
+            if (this.activeConnectionTest || !this.prism.getCopilotStatus().account) return;
+            const run = {};
+            this.activeConnectionTest = run;
+            this.connectionTestResult = undefined;
+            this.display();
+            let result: string;
+            try {
+              await this.prism.testCopilotConnection();
+              result = 'Connection successful.';
+            } catch (error) {
+              const reason = error instanceof LLMProviderError
+                ? ({ authentication: 'Run copilot login, then check CLI login.',
+                    rate_limit: 'Rate limited; retry later.',
+                    usage_limit: 'Check account usage or retry later.',
+                    quota: 'Check account usage.',
+                    context_limit: 'Shorten the request.',
+                    unavailable: 'Check the CLI and network, then retry.',
+                    invalid_request: 'Check the CLI installation and selected model.',
+                    unknown: 'Retry the connection test.' }[error.code] ?? 'Retry the connection test.')
+                : 'Retry the connection test.';
+              result = `Failed: ${reason}`;
+            }
+            if (this.activeConnectionTest !== run ||
+                this.prism.settings.llmConnection !== 'github-copilot') return;
+            this.activeConnectionTest = undefined;
+            this.connectionTestResult = result;
+            new Notice(result);
+            this.display();
+          }));
+      if (this.connectionTestResult) {
+        const result = containerEl.createEl('p', { text: this.connectionTestResult });
+        result.setAttr('role', 'status');
       }
     }
 
     if (connection === 'chatgpt-codex') {
-      containerEl.createEl('p', { text: 'Experimental Codex compatibility uses a ChatGPT account with Codex access. It uses an interface that can change. Device authorization contacts https://auth.openai.com. You may need to enable device-code sign-in in ChatGPT settings.' });
-      const { accountId, prompt, modelState, modelError } = this.prism.getCodexStatus();
-      new Setting(containerEl)
-        .setName('ChatGPT account')
-        .setDesc(accountId ? `Saved account: ${accountId}` : prompt ? 'Complete authorization in your browser.' : 'Not connected on this device.')
+      this.addIconNotice(containerEl, 'info',
+        'Experimental sign-in uses auth.openai.com.');
+      const { accountId, prompt, modelState } = codexStatus;
+      const accountSetting = this.createSetting(containerEl, 'ChatGPT account', 'user',
+        accountId ? `Connected: ${accountId}` : prompt ? 'Complete browser sign-in.' : 'Not connected.');
+      accountSetting
         .addButton((button) => button
           .setButtonText(accountId ? 'Reconnect' : 'Connect')
           .setDisabled(Boolean(prompt))
@@ -993,17 +1052,22 @@ class PrismSettingTab extends PluginSettingTab {
           .setDisabled(!accountId && !prompt)
           .onClick(() => { this.invalidateConnectionTest(); this.prism.signOutCodex(); this.display(); }));
       if (prompt) {
-        containerEl.createEl('p', { text: `Enter code ${prompt.userCode} at the OpenAI device sign-in page.` });
-        const link = containerEl.createEl('a', { text: 'Open ChatGPT device sign-in', href: prompt.verificationUrl });
+        containerEl.createEl('p', { text: `Enter code ${prompt.userCode}.` });
+        const link = containerEl.createEl('a', { text: 'Open sign-in', href: prompt.verificationUrl });
         link.setAttr('target', '_blank');
-        new Setting(containerEl).addButton((button) => button.setButtonText('Cancel sign-in')
-          .onClick(() => { this.prism.cancelCodexLogin(); this.display(); }));
+        accountSetting.addButton((button) => {
+          this.setIconButton(button, 'x', 'Cancel sign-in');
+          button.onClick(() => { this.prism.cancelCodexLogin(); this.display(); });
+        });
       }
       if (accountId) {
-        new Setting(containerEl).setName('Codex models')
-          .setDesc(`Sends the OAuth token to chatgpt.com to load listed model names. No Vault content is sent. Use Test ChatGPT connection to verify the selected model. ${modelState === 'loading' ? 'Loading models...' : modelError ?? ''}`)
-          .addButton((button) => button.setButtonText(modelState === 'loading' ? 'Loading models...' : 'Refresh models')
-            .setDisabled(modelState === 'loading').onClick(() => this.loadCodexModels(true)));
+        this.createSetting(containerEl, 'Codex models', 'list',
+          this.modelListStatus(modelState, codexModels.length))
+          .addButton((button) => {
+            this.setIconButton(button, 'refresh-cw', 'Refresh models');
+            button.setDisabled(modelState === 'loading')
+              .onClick(() => this.loadCodexModels(true));
+          });
         if (modelState === 'idle' && !codexModels.length) {
           void Promise.resolve().then(() => {
             if (this.visible && this.prism.settings.llmConnection === 'chatgpt-codex' &&
@@ -1011,13 +1075,11 @@ class PrismSettingTab extends PluginSettingTab {
           });
         }
       }
-      new Setting(containerEl)
-        .setName('Test ChatGPT connection')
-        .setDesc(accountId
-          ? 'Sends only "Reply with OK." to https://chatgpt.com/backend-api/codex/responses. No Vault content is sent.'
-          : 'Connect a ChatGPT account on this device to test the connection.')
+      this.createSetting(containerEl, 'Connection test', 'plug', accountId
+        ? 'Sends only “Reply with OK.” to chatgpt.com.'
+        : 'Connect ChatGPT first.')
         .addButton((button) => button
-          .setButtonText(this.activeConnectionTest ? 'Testing...' : 'Test connection')
+          .setButtonText(this.activeConnectionTest ? 'Testing…' : 'Test connection')
           .setDisabled(!accountId || Boolean(this.activeConnectionTest))
           .onClick(async () => {
             if (this.activeConnectionTest || !this.prism.getCodexStatus().accountId) return;
@@ -1028,18 +1090,18 @@ class PrismSettingTab extends PluginSettingTab {
             let result: string;
             try {
               await this.prism.testCodexConnection();
-              result = 'Success: ChatGPT (Codex) responded to the connection test.';
+              result = 'Connection successful.';
             } catch (error) {
               const reason = error instanceof LLMProviderError
-                ? ({ authentication: 'Authentication failed. Reconnect your ChatGPT account.',
-                    rate_limit: 'The account is rate limited or has reached its quota.',
-                    usage_limit: 'The account is rate limited or has reached its quota.',
-                    quota: 'The account has reached its usage quota. Check account usage.',
-                    context_limit: 'The request exceeds the model context limit.',
-                    unavailable: 'The Codex service or network is unavailable. Try again.',
-                    invalid_request: 'The selected model or account is not permitted to make this request.',
-                    unknown: 'The Codex response was incomplete or invalid.' }[error.code])
-                : 'Connection test could not run. Check the selected model and try again.';
+                ? ({ authentication: 'Reconnect ChatGPT.',
+                    rate_limit: 'Rate limited; retry later.',
+                    usage_limit: 'Check account usage or retry later.',
+                    quota: 'Check account usage.',
+                    context_limit: 'Shorten the request.',
+                    unavailable: 'Check the network and retry.',
+                    invalid_request: 'Choose another model.',
+                    unknown: 'Retry the connection test.' }[error.code] ?? 'Retry the connection test.')
+                : 'Retry the connection test.';
               result = `Failed: ${reason}`;
             }
             if (this.activeConnectionTest !== run ||
@@ -1060,14 +1122,12 @@ class PrismSettingTab extends PluginSettingTab {
 
     containerEl.createEl('h3', { text: 'Advanced' });
     const status = this.prism.getIndexStatus();
-    new Setting(containerEl)
-      .setName('Index status')
-      .setDesc(`Status: ${status.state}. ${status.sources} sources, ${status.chunks} chunks.${status.lastRebuildMs !== undefined
-        ? ` Last rebuild: ${status.lastRebuildMs} ms.` : ''}`);
+    this.createSetting(containerEl, 'Index status', 'database',
+      `${status.state} · ${status.sources} sources · ${status.chunks} chunks${status.lastRebuildMs !== undefined
+        ? ` · Rebuild: ${status.lastRebuildMs} ms` : ''}`);
     let readExclusions = () => this.prism.settings.excludedPaths.join('\n');
-    new Setting(containerEl)
-      .setName('Excluded paths')
-      .setDesc('One Vault-relative Markdown file or folder path per line. Folder paths include descendants. Applying removes matching indexed data; rebuild after removing a rule to include those notes again.')
+    this.createSetting(containerEl, 'Excluded paths', 'folder',
+      'One Vault path per line; rebuild after removing exclusions.')
       .addTextArea((text) => {
         text.setPlaceholder('Private/\nDraft.md')
           .setValue(this.prism.settings.excludedPaths.join('\n'));
@@ -1078,26 +1138,25 @@ class PrismSettingTab extends PluginSettingTab {
         .onClick(async () => {
           try {
             await this.prism.setExcludedPaths(readExclusions());
-            new Notice('Prism index exclusions applied.');
+            new Notice('Exclusions applied.');
             this.display();
           } catch {
-            new Notice('Prism could not apply index exclusions. Check paths and plugin storage, then retry.');
+            new Notice('Could not apply exclusions; check paths and storage.');
           }
         }));
-    new Setting(containerEl)
-      .setName('Rebuild index')
-      .setDesc('Recreate search indexes from Vault Markdown on this device. No Vault text is sent for indexing.')
+    this.createSetting(containerEl, 'Rebuild index', 'refresh-cw',
+      'Rebuilds locally; no Vault text is sent or changed.')
       .addButton((button) => button
         .setButtonText('Rebuild')
         .setDisabled(status.state === 'rebuilding')
         .onClick(() => this.prism.runRebuild()));
+    this.associateSettingControls();
   }
 
   private addApiKeySetting(name: string, configured: boolean, save: (value: string) => void): void {
-    new Setting(this.containerEl)
-      .setName(name)
-      .setDesc(configured ? 'Configured in Obsidian Secret Storage. Enter a new key and leave the field to replace it.'
-        : 'Enter a key and leave the field to save it in Obsidian Secret Storage.')
+    this.createSetting(this.containerEl, name, 'key', configured
+      ? 'Configured in Obsidian Secret Storage.'
+      : 'Saved in Obsidian Secret Storage on field exit.')
       .addText((text) => {
         text.inputEl.type = 'password';
         text.setPlaceholder(configured ? 'Configured' : 'API key');
@@ -1110,19 +1169,20 @@ class PrismSettingTab extends PluginSettingTab {
             this.display();
           } catch {
             text.setValue('');
-            new Notice('Prism could not save the API key. Try again.');
+            new Notice('Could not save key; retry.');
           }
         });
       })
-      .addButton((button) => button
-        .setButtonText('Clear')
-        .onClick(() => {
+      .addButton((button) => {
+        this.setIconButton(button, 'trash-2', 'Clear API key');
+        button.onClick(() => {
           try {
             save('');
             this.display();
           } catch {
-            new Notice('Prism could not clear the API key. Try again.');
+            new Notice('Could not clear key; retry.');
           }
-        }));
+        });
+      });
   }
 }
