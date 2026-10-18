@@ -2644,16 +2644,19 @@ test('a consented API-key run sends only the body and updates only the Prism pro
   assert.doesNotMatch(JSON.stringify(writes), /alpha launch|release checklist/i);
 });
 
-test('declining or dismissing consent sends nothing, and each run asks again even after success', async () => {
+test('declining or dismissing long-body consent sends nothing, and each run asks again even after success', async () => {
   const loaded = await loadFrontmatterPlugin();
   const { notices, modals, requests } = loaded;
-  const original = '# Note\nBody text\n';
+  const original = `# Note\n${'Long body text. '.repeat(1_000)}`;
+  const bodyBytes = Buffer.byteLength(original, 'utf8');
   const { file, view } = noteWith(loaded, 'note.md', original);
   let { run, modal } = await startRun(loaded);
+  assert.ok(visibleText(modal.contentEl).includes(`${bodyBytes.toLocaleString('en-US')} UTF-8 bytes`));
   await modalButton(modal, 'Cancel').click();
   await run;
   assert.equal(notices.at(-1), 'Search frontmatter cancelled; nothing was sent.');
   ({ run, modal } = await startRun(loaded));
+  assert.ok(visibleText(modal.contentEl).includes(`${bodyBytes.toLocaleString('en-US')} UTF-8 bytes`));
   modal.close();
   await run;
   assert.equal(notices.at(-1), 'Search frontmatter cancelled; nothing was sent.');
@@ -2664,6 +2667,8 @@ test('declining or dismissing consent sends nothing, and each run asks again eve
   await consentTo(modal);
   await run;
   assert.equal(requests.length, 1);
+  assert.deepEqual(JSON.parse(JSON.parse(requests[0].body).input[1].content), { note_body: original });
+  assert.equal(file.content.endsWith(original), true);
   ({ run, modal } = await startRun(loaded));
   assert.equal(modals.length, 4);
   assert.equal(modal.isOpen, true);
@@ -2767,14 +2772,13 @@ test('an unconfigured or unavailable connection is reported before consent and s
   }
 });
 
-test('empty or oversized bodies and unsafe frontmatter stop before consent and leave the note unchanged', async () => {
+test('empty bodies and unsafe frontmatter stop before consent and leave the note unchanged', async () => {
   const loaded = await loadFrontmatterPlugin();
   const invalid = 'The note frontmatter is not valid YAML, so nothing was sent. Fix it and retry.';
   const unsafe = 'Prism cannot safely update this note frontmatter, so nothing was sent.';
   for (const [content, notice] of [
     ['---\ntitle: Only properties\n---\n', 'The note body is empty, so nothing was sent.'],
     ['---\ntitle: Blank\n---\n \n\n', 'The note body is empty, so nothing was sent.'],
-    [`# Long\n${'a'.repeat(12_000)}`, 'The note body exceeds 12,000 UTF-8 bytes, so nothing was sent. Shorten it and retry.'],
     ['---\ntitle: [broken\n---\nBody\n', invalid],
     ['---\ntitle: One\ntitle: Two\n---\nBody\n', invalid],
     ['---\nprism_summary: &s Shared\ntitle: *s\n---\nBody\n', unsafe],
@@ -2791,10 +2795,53 @@ test('empty or oversized bodies and unsafe frontmatter stop before consent and l
   assert.equal(loaded.requests.length, 0);
 });
 
+test('consent shows a provisional byte warning only above 12,000 bytes and approval sends the full body', async () => {
+  const loaded = await loadFrontmatterPlugin();
+  const cases = [
+    { name: 'exact threshold', body: 'a'.repeat(12_000), bytes: 12_000, warned: false },
+    { name: 'multibyte exact threshold', body: 'あ'.repeat(4_000), bytes: 12_000, warned: false },
+    { name: 'multibyte over threshold', body: 'あ'.repeat(4_001), bytes: 12_003, warned: true },
+  ];
+
+  for (const item of cases) {
+    assert.equal(Buffer.byteLength(item.body, 'utf8'), item.bytes);
+    const { file } = noteWith(loaded, `${item.name}.md`, item.body);
+    const modalCount = loaded.modals.length;
+    const { run, modal } = await startRun(loaded);
+    assert.ok(modal);
+    assert.equal(loaded.modals.length, modalCount + 1);
+    const disclosure = visibleText(modal.contentEl);
+    for (const expected of ['body of', 'OpenAI API (api.openai.com)', 'answer-model',
+      'prism_summary, prism_keywords and prism_aliases']) {
+      assert.ok(disclosure.includes(expected), expected);
+    }
+    if (item.warned) {
+      for (const expected of [`${item.bytes.toLocaleString('en-US')} UTF-8 bytes`, 'provisional',
+        '12,000-byte warning threshold', 'more time', 'provider capacity', 'rejected by the provider',
+        'API-key usage may incur charges']) {
+        assert.ok(disclosure.includes(expected), expected);
+      }
+    } else {
+      assert.doesNotMatch(disclosure, /UTF-8 bytes|warning threshold|incur charges/i);
+    }
+    assert.equal(loaded.requests.length, cases.indexOf(item));
+    await consentTo(modal);
+    await run;
+    const sent = loaded.requests.at(-1);
+    assert.equal(sent.url, 'https://api.openai.com/v1/responses');
+    assert.deepEqual(JSON.parse(JSON.parse(sent.body).input[1].content), {
+      note_body: item.body,
+    });
+    assert.equal(loaded.requests.length, cases.indexOf(item) + 1);
+    assert.equal(file.content.endsWith(item.body), true);
+  }
+});
+
 test('refused, incomplete, malformed, out-of-schema and failed replies never change the note', async () => {
   let reply;
   const loaded = await loadFrontmatterPlugin({ reply: () => reply });
-  const original = '---\ntitle: Keep\n---\n# Note\nBody text\n';
+  const body = `# Note\n${'Body text\n'.repeat(1_300)}`;
+  const original = `---\ntitle: Keep\n---\n${body}`;
   const { file, view } = noteWith(loaded, 'note.md', original);
   const replies = [
     openAIOutput('I cannot help with that.'),
@@ -2807,6 +2854,7 @@ test('refused, incomplete, malformed, out-of-schema and failed replies never cha
       incomplete_details: { reason: 'max_output_tokens' } }),
     { status: 200, text: JSON.stringify({ output: [{ type: 'message',
       content: [{ type: 'refusal', refusal: 'Refusal detail' }] }] }) },
+    { status: 413, text: 'private provider capacity detail' },
     { status: 500, text: 'private upstream detail' },
     { status: 401, text: '{"error":{"message":"private auth detail"}}' },
   ];
@@ -2815,12 +2863,14 @@ test('refused, incomplete, malformed, out-of-schema and failed replies never cha
     const { run, modal } = await startRun(loaded);
     await consentTo(modal);
     await run;
+    assert.deepEqual(JSON.parse(JSON.parse(loaded.requests.at(-1).body).input[1].content), { note_body: body });
     assert.match(loaded.notices.at(-1), /the note was not changed/i);
     assert.doesNotMatch(loaded.notices.at(-1), /private|Refusal detail|Injected/);
     assert.equal(file.content, original);
     assert.equal(view.editor.getValue(), original);
   }
   assert.equal(loaded.requests.length, replies.length);
+  assert.ok(loaded.requests.every((request) => request.url === 'https://api.openai.com/v1/responses'));
   assert.equal(loaded.transactions.length, 0);
 });
 

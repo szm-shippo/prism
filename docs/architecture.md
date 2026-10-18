@@ -80,7 +80,7 @@ Provider 設定 UI はモデル ID をプラグイン設定データへ保存し
 
 ## 検索用 frontmatter
 
-`src/core/application/search-frontmatter.ts` は本文の上限確認、LLM への依頼、応答 JSON の検証を担う。`JSON.parse` は重複キーを後勝ちで受理するため、解析前に最上位のキーだけを文字列と括弧の深さを追って比較し、重複を拒否する。
+`src/core/application/search-frontmatter.ts` は空本文の拒否、LLM への依頼、応答 JSON の検証を担う。`src/obsidian/plugin.ts` は本文の UTF-8 バイト数を数え、12,000 バイトを超える場合は実際のサイズと暫定的な警告を実行ごとの確認画面に表示する。この値はモデルの入力容量を表す上限ではなく、実際の接続先やモデルの制限により送信後に拒否されることがある。`JSON.parse` は重複キーを後勝ちで受理するため、解析前に最上位のキーだけを文字列と括弧の深さを追って比較し、重複を拒否する。
 
 `src/obsidian/frontmatter-update.ts` は先頭の `---` 行から次の `---` 行までを frontmatter とし、`yaml` 2.9.1 の `parseDocument`（`keepSourceTokens`・`uniqueKeys`・`stringKeys`）で解析する。Obsidian の `parseYaml`・`stringifyYaml` による全体の再生成はコメントや書式を失い、重複キーの扱いも Obsidian の実装に依存するため使わない。最上位の `prism_summary`・`prism_keywords`・`prism_aliases` の値だけを、CST の `:` の位置から AST の値の終端までの元の文字列範囲で置き換え、ない項目は YAML の末尾に追加する。値は JSON 形式の二重引用符文字列とフローシーケンスで書き、YAML の版や読み手のパーサーで型が変わらないようにする。
 

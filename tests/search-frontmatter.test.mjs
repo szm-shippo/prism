@@ -45,21 +45,26 @@ test('generation sends only the note body as untrusted data with fixed instructi
   assert.doesNotMatch(instructions, /hacked/);
 });
 
-test('empty, whitespace-only and over-12,000-byte bodies are rejected before any request without truncation', async () => {
+test('empty bodies are rejected, while bodies at and above the provisional warning threshold are sent whole', async () => {
   for (const body of ['', ' \n\t\r\n ']) {
     const provider = providerReturning(JSON.stringify(valid));
     assert.throws(() => checkSearchFrontmatterBody(body), /body is empty/);
     await assert.rejects(generateSearchFrontmatter(provider, body), /body is empty/);
     assert.equal(provider.requests.length, 0);
   }
-  for (const body of ['a'.repeat(12_000), 'あ'.repeat(4_000)]) {
+
+  for (const [body, expectedBytes] of [
+    ['a'.repeat(12_000), 12_000],
+    ['あ'.repeat(4_000), 12_000],
+    ['a'.repeat(12_001), 12_001],
+    ['あ'.repeat(4_001), 12_003],
+  ]) {
+    assert.equal(new TextEncoder().encode(body).byteLength, expectedBytes);
     assert.doesNotThrow(() => checkSearchFrontmatterBody(body));
-  }
-  for (const body of ['a'.repeat(12_001), `${'あ'.repeat(4_000)}a`, `${'a'.repeat(11_999)}é`]) {
     const provider = providerReturning(JSON.stringify(valid));
-    assert.throws(() => checkSearchFrontmatterBody(body), /exceeds 12,000 UTF-8 bytes/);
-    await assert.rejects(generateSearchFrontmatter(provider, body), /exceeds 12,000 UTF-8 bytes/);
-    assert.equal(provider.requests.length, 0);
+    assert.deepEqual(await generateSearchFrontmatter(provider, body), valid);
+    assert.equal(provider.requests.length, 1);
+    assert.deepEqual(JSON.parse(provider.requests[0].messages[1].content), { note_body: body });
   }
 });
 

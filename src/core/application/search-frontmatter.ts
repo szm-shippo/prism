@@ -6,7 +6,6 @@ export interface SearchFrontmatter {
   prism_aliases: string[];
 }
 
-const MAX_BODY_BYTES = 12_000;
 const MAX_SUMMARY_CHARACTERS = 240;
 const MAX_KEYWORDS = 12;
 const MAX_ALIASES = 8;
@@ -115,9 +114,6 @@ function parseResponse(response: LLMResponse): SearchFrontmatter {
 
 export function checkSearchFrontmatterBody(body: string): void {
   if (!body.trim()) throw new Error('The note body is empty.');
-  if (new TextEncoder().encode(body).byteLength > MAX_BODY_BYTES) {
-    throw new Error('The note body exceeds 12,000 UTF-8 bytes.');
-  }
 }
 
 export async function generateSearchFrontmatter(

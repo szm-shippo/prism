@@ -32,7 +32,7 @@ Obsidian Desktop では Copilot CLI を `copilot login` で認証し、Prism 設
 
 コマンドパレットから「Generate search frontmatter」を実行すると、選択中のLLM接続先とモデルを使い、実行ごとの確認後に現在のMarkdown本文だけを送信します。ファイル名、既存frontmatter、Askの会話履歴、検索結果は送りません。LLM応答は3項目だけのJSONオブジェクト（summaryは文字列、keywordsとaliasesは文字列配列）として検証し、`prism_summary`、`prism_keywords`、`prism_aliases` だけを自動更新します。
 
-本文はUTF-8で12,000バイトまでです。summaryは240文字まで、keywordsは12件まで、aliasesは8件までで、各語句は64文字までです。応答JSONに同じキーが重複している場合も書き込みません。
+本文が空の場合は送信しません。本文が12,000 UTF-8バイトを超えると、確認画面に実際のサイズと暫定的な警告を表示します。この値はモデルの入力容量を示す上限ではありません。接続先やモデルの実際の制限により、承認して送信した本文が拒否されることがあります。summaryは240文字まで、keywordsは12件まで、aliasesは8件までで、各語句は64文字までです。応答JSONに同じキーが重複している場合も書き込みません。
 
 既存frontmatterでは3項目の値の部分だけを置き換え、ない項目はfrontmatterの末尾に追加します。値は `"..."` の文字列と `["...", "..."]` のリストで書きます。他のプロパティ、コメント、空行、引用符などの書き方、BOM、改行コード、本文は変えません。重複キーやアンカーなど、置き換える範囲を確実に特定できないfrontmatterでは送信前に中断します（対象は[モジュール境界](docs/architecture.md#検索用-frontmatter)を参照）。
 

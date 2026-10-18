@@ -29,6 +29,8 @@ import { LOCAL_MODEL_KEY } from '../core/provider/local-embedding-model';
 import { LocalEmbeddingError } from '../core/provider/local-embedding-error';
 import { FrontmatterError, parseNote, type ParsedNote } from './frontmatter-update';
 
+const SEARCH_FRONTMATTER_WARNING_BYTES = 12_000;
+
 interface LlmSelectionSnapshot {
   connection: PluginSettings['llmConnection'];
   modelId: string;
@@ -688,6 +690,7 @@ export default class PrismPlugin extends Plugin {
 
   private async requestFrontmatterConsent(snapshot: FrontmatterTargetSnapshot,
     selection: LlmSelectionSnapshot): Promise<boolean> {
+    const bodyBytes = new TextEncoder().encode(snapshot.note.body).byteLength;
     return new Promise((resolve) => {
       let settled = false;
       const settle = (consented: boolean) => {
@@ -704,6 +707,13 @@ export default class PrismPlugin extends Plugin {
           this.contentEl.createEl('p', { text:
             `Send only the body of “${snapshot.file.basename}” to ${selection.destination} with model “${selection.modelId}”${account}? ` +
             'Prism will automatically update prism_summary, prism_keywords and prism_aliases.' });
+          if (bodyBytes > SEARCH_FRONTMATTER_WARNING_BYTES) {
+            const apiKeyCharge = selection.connection === 'api-key' ? ' API-key usage may incur charges.' : '';
+            this.contentEl.createEl('p', { text:
+              `This body is ${bodyBytes.toLocaleString('en-US')} UTF-8 bytes, above the provisional ` +
+              '12,000-byte warning threshold. Longer requests may take more time, use more provider capacity, ' +
+              `or be rejected by the provider.${apiKeyCharge}` });
+          }
           const actions = this.contentEl.createDiv();
           actions.createEl('button', { text: 'Send' }).addEventListener('click', () => settle(true));
           actions.createEl('button', { text: 'Cancel' }).addEventListener('click', () => settle(false));
@@ -805,10 +815,8 @@ export default class PrismPlugin extends Plugin {
         return;
       }
       try { checkSearchFrontmatterBody(snapshot.note.body); }
-      catch (error) {
-        new Notice(error instanceof Error && error.message.includes('12,000')
-          ? 'The note body exceeds 12,000 UTF-8 bytes, so nothing was sent. Shorten it and retry.'
-          : 'The note body is empty, so nothing was sent.');
+      catch {
+        new Notice('The note body is empty, so nothing was sent.');
         return;
       }
 
