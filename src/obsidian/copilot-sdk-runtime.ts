@@ -135,7 +135,7 @@ const GENERATION_TIMEOUT_MS = 90_000;
 const SEND_TIMEOUT_MS = 60_000;
 const CLIENT_STOP_TIMEOUT_MS = 5_000;
 const TEMP_DIRECTORY_PREFIX = 'prism-copilot-';
-const SDK_ABORT_FEEDBACK = 'Prism Ask does not run tools.';
+const SDK_ABORT_FEEDBACK = 'Prism does not run tools.';
 
 const ALLOWED_ENV_NAMES = new Set([
   'path', 'pathext', 'systemroot', 'windir', 'temp', 'tmp', 'tmpdir',
@@ -366,7 +366,7 @@ function promptFor(messages: readonly LLMMessage[], context: readonly LLMContext
     transcript.splice(lastUserIndex, 0, reference);
   }
   return [
-    'Respond to the final user message in this Prism Ask conversation. The following JSON contains conversation messages and reference material:',
+    'Respond to the final user message in this Prism request. The following JSON contains conversation messages and reference material:',
     JSON.stringify(transcript),
   ].join('\n\n');
 }
