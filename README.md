@@ -28,6 +28,18 @@ npm test
 
 Obsidian Desktop では Copilot CLI を `copilot login` で認証し、Prism 設定の「Check CLI login」を実行します。詳細は [GitHub Copilot 接続手順](docs/github-copilot.md) を参照してください。
 
+## 検索用 frontmatter の生成
+
+コマンドパレットから「Generate search frontmatter」を実行すると、選択中のLLM接続先とモデルを使い、実行ごとの確認後に現在のMarkdown本文だけを送信します。ファイル名、既存frontmatter、Askの会話履歴、検索結果は送りません。LLM応答は3項目だけのJSONオブジェクト（summaryは文字列、keywordsとaliasesは文字列配列）として検証し、`prism_summary`、`prism_keywords`、`prism_aliases` だけを自動更新します。
+
+本文はUTF-8で12,000バイトまでです。summaryは240文字まで、keywordsは12件まで、aliasesは8件までで、各語句は64文字までです。応答JSONに同じキーが重複している場合も書き込みません。
+
+既存frontmatterでは3項目の値の部分だけを置き換え、ない項目はfrontmatterの末尾に追加します。値は `"..."` の文字列と `["...", "..."]` のリストで書きます。他のプロパティ、コメント、空行、引用符などの書き方、BOM、改行コード、本文は変えません。重複キーやアンカーなど、置き換える範囲を確実に特定できないfrontmatterでは送信前に中断します（対象は[モジュール境界](docs/architecture.md#検索用-frontmatter)を参照）。
+
+同じノートを複数のタブで開いている場合や、確認後にノートまたはLLM設定が変わった場合も中断し、再試行を案内します。書き込み中にエラーが起きた場合は、エディターとファイルを読み直し、変更なし・書き込み済み・一部のみ反映・確認できない、のいずれかを通知します。自動で元に戻したり再試行したりはしません。
+
+この機能では選択中のLLMに本文を送り、失敗しても別の接続先へ切り替えません。ローカルの全文検索・Embedding処理とは別の機能です。
+
 ## ローカル Embedding
 
 使い方は [ローカル Embedding の利用手順](docs/local-embedding.md) を参照してください。

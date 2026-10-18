@@ -61,6 +61,13 @@ const copilotLicenseText = await Promise.all(copilotLicenses.map(async ([name, p
   `${name}\n${await readFile(path, 'utf8')}`));
 await writeFile('target/COPILOT_SDK_LICENSES.txt', copilotLicenseText.join('\n\n'));
 
+const mainLicenses = [
+  ['yaml@2.9.1', 'node_modules/yaml/LICENSE'],
+];
+const mainLicenseText = await Promise.all(mainLicenses.map(async ([name, path]) =>
+  `${name}\n${await readFile(path, 'utf8')}`));
+await writeFile('target/MAIN_LICENSES.txt', mainLicenseText.join('\n\n'));
+
 const context = await esbuild.context({
   entryPoints: ['src/main.ts'],
   bundle: true,

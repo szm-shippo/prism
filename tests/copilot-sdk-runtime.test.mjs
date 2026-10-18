@@ -457,9 +457,9 @@ test('generation sends only selected model, provided conversation and retrieved 
   assert.equal(config.systemMessage.mode, 'replace');
   assert.match(config.systemMessage.content, /Use only supplied evidence/);
   assert.equal(Object.hasOwn(config, 'onUserInputRequest'), false);
-  assert.deepEqual(await config.onPermissionRequest(), { kind: 'reject', feedback: 'Prism Ask does not run tools.' });
+  assert.deepEqual(await config.onPermissionRequest(), { kind: 'reject', feedback: 'Prism does not run tools.' });
   assert.deepEqual(await config.hooks.onPreToolUse({}), {
-    permissionDecision: 'deny', permissionDecisionReason: 'Prism Ask does not run tools.',
+    permissionDecision: 'deny', permissionDecisionReason: 'Prism does not run tools.',
   });
   assert.equal(send[2], 60_000);
   const prompt = JSON.parse(send[1].prompt.split('\n\n').at(-1));
@@ -475,6 +475,17 @@ test('generation sends only selected model, provided conversation and retrieved 
   assert.ok(calls.indexOf('stop') < calls.indexOf('forceStop') || !calls.includes('forceStop'));
   await assert.rejects(stat(config.configDirectory));
   await assert.rejects(stat(config.workingDirectory));
+});
+
+test('generation prompt header is not specific to Ask, so non-Ask requests send only their own messages', async () => {
+  const harness = makeHarness();
+  const user = { role: 'user', content: '{"note_body":"Body"}' };
+  await harness.runtime.generate({ expectedAccount, modelId: 'selected', context: [],
+    messages: [{ role: 'system', content: 'Return JSON only.' }, user] });
+  const [header, transcript, ...rest] = harness.calls.find(([kind]) => kind === 'sendAndWait')[1].prompt.split('\n\n');
+  assert.doesNotMatch(header, /\bAsk\b/);
+  assert.deepEqual(JSON.parse(transcript), [user]);
+  assert.deepEqual(rest, []);
 });
 
 test('known SDK error categories become fixed safe errors and no partial answer escapes', async () => {

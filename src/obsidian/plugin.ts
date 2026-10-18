@@ -1,7 +1,9 @@
-import { ButtonComponent, FileSystemAdapter, Notice, Platform, Plugin, PluginSettingTab, Setting, setIcon, TFile } from 'obsidian';
+import { ButtonComponent, FileSystemAdapter, MarkdownView, Modal, Notice, Platform, Plugin, PluginSettingTab,
+  Setting, setIcon, TFile, type TAbstractFile } from 'obsidian';
 import { CitationAnswerer, type CitedAnswer, type SourceCitation } from '../core/application/citation-answerer';
 import { RagPipeline } from '../core/application/rag-pipeline';
 import type { ConversationExchange } from '../core/application/conversation-history';
+import { generateSearchFrontmatter, checkSearchFrontmatterBody, type SearchFrontmatter } from '../core/application/search-frontmatter';
 import { SourceRegistry, type SourceRecord } from '../core/index/source-registry';
 import { ChunkRegistry } from '../core/index/chunk-registry';
 import { ChunkPipeline } from '../core/index/chunk-pipeline';
@@ -18,13 +20,46 @@ import { CodexLLMProvider } from './codex-llm-provider';
 import { clearLegacyCopilotCredential } from './copilot-auth';
 import { CopilotLLMProvider, CopilotLLMProviderError } from './copilot-llm-provider';
 import type { CopilotModelInfo, CopilotRuntimeErrorStage, CopilotSdkRuntime } from './copilot-sdk-runtime';
-import { LLMProviderError } from '../core/provider/llm-provider';
+import { LLMProviderError, type LLMRequest, type LLMResponse } from '../core/provider/llm-provider';
 import { CHAT_VIEW_TYPE, PrismChatView } from './chat-view';
 import { loadSettings, type CopilotAccount, type PluginSettings } from '../settings';
 import { LocalEmbeddingModel } from './local-embedding-model';
 import { LocalEmbeddingProvider } from './local-embedding-provider';
 import { LOCAL_MODEL_KEY } from '../core/provider/local-embedding-model';
 import { LocalEmbeddingError } from '../core/provider/local-embedding-error';
+import { FrontmatterError, parseNote, type ParsedNote } from './frontmatter-update';
+
+interface LlmSelectionSnapshot {
+  connection: PluginSettings['llmConnection'];
+  modelId: string;
+  destination: string;
+  accountLabel?: string;
+  accountId?: string;
+  copilotAccount?: CopilotAccount;
+  apiKey?: string;
+  generation: number;
+}
+
+interface FrontmatterTargetSnapshot {
+  file: TFile;
+  path: string;
+  editorText: string;
+  diskText: string;
+  fileRevision: number;
+  note: ParsedNote;
+}
+
+/** Raised before Prism changes the note, so the note is known to be untouched. */
+class FrontmatterRunConflict extends Error {
+  constructor(readonly reason: 'changed' | 'multiple-views' = 'changed') { super(reason); }
+}
+
+type FrontmatterWriteOutcome = 'unchanged' | 'expected' | 'partial' | 'unknown';
+
+/** Raised after a write was attempted; the outcome comes from re-reading the editor and the file. */
+class FrontmatterWriteError extends Error {
+  constructor(readonly outcome: FrontmatterWriteOutcome) { super(outcome); }
+}
 
 function joinDesktopPath(root: string, directory: string, filename: string): string {
   const separator = root.includes('\\') ? '\\' : '/';
@@ -90,6 +125,9 @@ export default class PrismPlugin extends Plugin {
   private localEmbeddings?: LocalEmbeddingProvider;
   private embeddingGeneration = 0;
   private lastRebuildMs?: number;
+  private llmSelectionGeneration = 0;
+  private readonly frontmatterFileRevision = new WeakMap<TFile, number>();
+  private readonly activeFrontmatterRuns = new Set<TFile>();
 
   async onload(): Promise<void> {
     const loaded = await this.loadData();
@@ -229,29 +267,7 @@ export default class PrismPlugin extends Plugin {
     });
     const reranker = new RetrievalReranker((chunkId) => allowedChunk(chunkId)?.content);
     const answerer = new CitationAnswerer({
-      generate: async (request) => {
-        if (this.settings.llmConnection === 'chatgpt-codex') {
-          if (!this.codexAuth) throw new Error('ChatGPT connection is not ready.');
-          return new CodexLLMProvider(this.codexAuth, this.settings.codexModel).generate(request);
-        }
-        if (this.settings.llmConnection === 'github-copilot') {
-          if (!Platform.isDesktopApp) throw new LLMProviderError('unavailable');
-          if (!this.settings.copilotAccount) throw new LLMProviderError('authentication');
-          await this.requireCopilotModel();
-          const provider = this.createCopilotProvider();
-          this.copilotProviders.add(provider);
-          try { return await provider.generate(request); }
-          finally {
-            this.copilotProviders.delete(provider);
-            await provider.dispose();
-          }
-        }
-        const key = this.app.secretStorage.getSecret('prism-llm-api-key');
-        if (!key || !this.settings.llmModel.trim()) {
-          throw new Error('Configure an LLM model and API key before asking Prism.');
-        }
-        return new OpenAILLMProvider(key, this.settings.llmModel).generate(request);
-      },
+      generate: (request) => this.generateWithSelectedLlm(request),
     }, chunks, (path) => {
       const file = this.app.vault.getAbstractFileByPath(path);
       return !isExcludedPath(path, this.settings.excludedPaths) &&
@@ -278,9 +294,11 @@ export default class PrismPlugin extends Plugin {
       return sourceEvents.modify(file).catch(() => new Notice('Prism could not update search indexes. Check embedding settings and plugin storage.'));
     }));
     this.registerEvent(this.app.vault.on('rename', (file, oldPath) => {
+      this.recordFrontmatterFileRevision(file);
       return sourceEvents.rename(file, oldPath).catch(() => new Notice('Prism could not move a Markdown source. Check plugin storage.'));
     }));
     this.registerEvent(this.app.vault.on('delete', (file) => {
+      this.recordFrontmatterFileRevision(file);
       return sourceEvents.delete(file).catch(() => new Notice('Prism could not remove a Markdown source. Check plugin storage.'));
     }));
     this.registerView(CHAT_VIEW_TYPE, (leaf) => new PrismChatView(
@@ -290,6 +308,8 @@ export default class PrismPlugin extends Plugin {
     });
     this.addCommand({ id: 'open-chat', name: 'Open Ask view', callback: showChat });
     this.addCommand({ id: 'rebuild-index', name: 'Rebuild index', callback: () => this.rebuildFromCommand() });
+    this.addCommand({ id: 'generate-search-frontmatter', name: 'Generate search frontmatter',
+      callback: () => this.generateFrontmatterFromActiveNote() });
     this.addRibbonIcon('message-square', 'Open Prism Ask', showChat);
     this.prismSettingTab = new PrismSettingTab(this);
     this.addSettingTab(this.prismSettingTab);
@@ -297,6 +317,7 @@ export default class PrismPlugin extends Plugin {
 
   onunload(): void {
     this.embeddingGeneration++;
+    this.llmSelectionGeneration++;
     this.localModel?.cancel();
     this.localEmbeddings?.dispose();
     this.codexAuth?.cancelPending();
@@ -304,14 +325,15 @@ export default class PrismPlugin extends Plugin {
     this.prismSettingTab?.invalidateConnectionTest();
   }
 
-  private createCopilotProvider(modelId = this.settings.copilotModel): CopilotLLMProvider {
+  private createCopilotProvider(modelId = this.settings.copilotModel,
+    expectedAccount = this.settings.copilotAccount): CopilotLLMProvider {
     if (!Platform.isDesktopApp) throw new LLMProviderError('unavailable');
     const pluginDirectory = this.manifest.dir;
     const adapter = this.app.vault.adapter;
     if (!pluginDirectory || !(adapter instanceof FileSystemAdapter)) throw new LLMProviderError('unavailable');
     const sidecarPath = joinDesktopPath(adapter.getBasePath(), pluginDirectory, 'copilot-sdk-runtime.cjs');
     return new CopilotLLMProvider({
-      expectedAccount: this.settings.copilotAccount,
+      expectedAccount,
       modelId,
       sidecarPath,
       isDesktop: () => Platform.isDesktopApp,
@@ -333,6 +355,7 @@ export default class PrismPlugin extends Plugin {
 
   private forgetCopilotAccount(): void {
     const hadAccount = Boolean(this.settings.copilotAccount);
+    this.llmSelectionGeneration++;
     this.settings = { ...this.settings, copilotAccount: undefined };
     this.invalidateCopilotOperations();
     this.prismSettingTab?.invalidateConnectionTest();
@@ -379,16 +402,17 @@ export default class PrismPlugin extends Plugin {
     return load;
   }
 
-  private async requireCopilotModel(): Promise<void> {
-    if (!this.settings.copilotModel.trim()) throw new LLMProviderError('invalid_request');
+  private async requireCopilotModel(modelId = this.settings.copilotModel): Promise<void> {
+    if (!modelId.trim()) throw new LLMProviderError('invalid_request');
     if (this.copilotModelState !== 'ready') await this.refreshCopilotModels(false);
-    if (!this.copilotModels.some((model) => model.id === this.settings.copilotModel && model.policy?.state !== 'disabled')) {
+    if (!this.copilotModels.some((model) => model.id === modelId && model.policy?.state !== 'disabled')) {
       throw new LLMProviderError('invalid_request');
     }
   }
 
   async checkCopilotLogin(): Promise<void> {
     if (!Platform.isDesktopApp) throw new LLMProviderError('unavailable');
+    this.llmSelectionGeneration++;
     this.settings = { ...this.settings, copilotAccount: undefined };
     this.invalidateCopilotOperations();
     this.prismSettingTab?.invalidateConnectionTest();
@@ -421,6 +445,7 @@ export default class PrismPlugin extends Plugin {
   }
 
   async disconnectCopilot(): Promise<void> {
+    this.llmSelectionGeneration++;
     this.settings = { ...this.settings, copilotAccount: undefined };
     this.invalidateCopilotOperations();
     this.prismSettingTab?.invalidateConnectionTest();
@@ -454,9 +479,11 @@ export default class PrismPlugin extends Plugin {
 
   async startCodexLogin(): Promise<void> {
     if (!this.codexAuth) throw new Error('ChatGPT connection is not ready.');
+    this.llmSelectionGeneration++;
     const prompt = await this.codexAuth.startDeviceLogin();
     this.codexPrompt = prompt;
     void prompt.complete.then(async () => {
+      this.llmSelectionGeneration++;
       if (this.codexPrompt === prompt) this.codexPrompt = undefined;
       this.prismSettingTab?.invalidateConnectionTest();
       try { await this.codexAuth?.listModels(true); }
@@ -465,6 +492,7 @@ export default class PrismPlugin extends Plugin {
       new Notice('ChatGPT account connected to Prism.');
       this.refreshSettingTab();
     }, () => {
+      this.llmSelectionGeneration++;
       if (this.codexPrompt === prompt) this.codexPrompt = undefined;
       this.prismSettingTab?.invalidateConnectionTest();
       new Notice('ChatGPT authorization did not complete. Try connecting again.');
@@ -478,6 +506,7 @@ export default class PrismPlugin extends Plugin {
   }
 
   signOutCodex(): void {
+    this.llmSelectionGeneration++;
     this.codexAuth?.signOut();
     this.codexPrompt = undefined;
   }
@@ -519,6 +548,308 @@ export default class PrismPlugin extends Plugin {
     if (!(file instanceof TFile) || file.extension !== 'md') return false;
     await this.app.workspace.getLeaf(false).openFile(file);
     return true;
+  }
+
+  private captureLlmSelection(): LlmSelectionSnapshot {
+    const connection = this.settings.llmConnection;
+    if (connection === 'api-key') {
+      const apiKey = this.app.secretStorage.getSecret('prism-llm-api-key') ?? undefined;
+      if (!apiKey || !this.settings.llmModel.trim()) {
+        throw new Error('Configure an LLM model and API key before asking Prism.');
+      }
+      return { connection, modelId: this.settings.llmModel, destination: 'OpenAI API (api.openai.com)',
+        apiKey, generation: this.llmSelectionGeneration };
+    }
+    if (connection === 'chatgpt-codex') {
+      if (!this.codexAuth?.connected || !this.codexAuth.accountId) throw new LLMProviderError('authentication');
+      if (!this.settings.codexModel.trim()) throw new LLMProviderError('invalid_request');
+      return { connection, modelId: this.settings.codexModel, destination: 'ChatGPT (chatgpt.com)',
+        accountLabel: this.codexAuth.accountId, accountId: this.codexAuth.accountId,
+        generation: this.llmSelectionGeneration };
+    }
+    if (!Platform.isDesktopApp) throw new LLMProviderError('unavailable');
+    const account = this.settings.copilotAccount;
+    if (!account) throw new LLMProviderError('authentication');
+    if (!this.settings.copilotModel.trim()) throw new LLMProviderError('invalid_request');
+    return { connection, modelId: this.settings.copilotModel, destination: 'GitHub Copilot',
+      accountLabel: account.login, copilotAccount: { ...account }, generation: this.llmSelectionGeneration };
+  }
+
+  private llmSelectionIsCurrent(selection: LlmSelectionSnapshot): boolean {
+    if (selection.generation !== this.llmSelectionGeneration || this.settings.llmConnection !== selection.connection) return false;
+    if (selection.connection === 'api-key') {
+      return this.settings.llmModel === selection.modelId &&
+        this.app.secretStorage.getSecret('prism-llm-api-key') === selection.apiKey;
+    }
+    if (selection.connection === 'chatgpt-codex') {
+      return this.settings.codexModel === selection.modelId && this.codexAuth?.connected === true &&
+        this.codexAuth.accountId === selection.accountId;
+    }
+    const current = this.settings.copilotAccount;
+    return Platform.isDesktopApp && this.settings.copilotModel === selection.modelId &&
+      current?.host === selection.copilotAccount?.host && current?.login === selection.copilotAccount?.login;
+  }
+
+  private async generateWithLlmSelection(selection: LlmSelectionSnapshot, request: LLMRequest): Promise<LLMResponse> {
+    if (!this.llmSelectionIsCurrent(selection)) throw new LLMProviderError('invalid_request');
+    if (selection.connection === 'api-key') {
+      return new OpenAILLMProvider(selection.apiKey!, selection.modelId).generate(request);
+    }
+    if (selection.connection === 'chatgpt-codex') {
+      if (!this.codexAuth) throw new LLMProviderError('authentication');
+      return new CodexLLMProvider(this.codexAuth, selection.modelId).generate(request);
+    }
+
+    await this.requireCopilotModel(selection.modelId);
+    if (!this.llmSelectionIsCurrent(selection)) throw new LLMProviderError('invalid_request');
+    const provider = this.createCopilotProvider(selection.modelId, selection.copilotAccount);
+    this.copilotProviders.add(provider);
+    try { return await provider.generate(request); }
+    finally {
+      this.copilotProviders.delete(provider);
+      await provider.dispose();
+    }
+  }
+
+  private generateWithSelectedLlm(request: LLMRequest): Promise<LLMResponse> {
+    return this.generateWithLlmSelection(this.captureLlmSelection(), request);
+  }
+
+  private getOpenMarkdownViews(file: TFile): MarkdownView[] {
+    return this.app.workspace.getLeavesOfType('markdown')
+      .map((leaf) => leaf.view)
+      .filter((view): view is MarkdownView => view instanceof MarkdownView && view.file === file);
+  }
+
+  private frontmatterFileIsCurrent(target: Pick<FrontmatterTargetSnapshot, 'file' | 'path' | 'fileRevision'>): boolean {
+    return target.file.path === target.path &&
+      this.app.vault.getAbstractFileByPath(target.path) === target.file &&
+      (this.frontmatterFileRevision.get(target.file) ?? 0) === target.fileRevision;
+  }
+
+  private recordFrontmatterFileRevision(file: TAbstractFile): void {
+    if (!(file instanceof TFile)) return;
+    this.frontmatterFileRevision.set(file, (this.frontmatterFileRevision.get(file) ?? 0) + 1);
+  }
+
+  private async readFrontmatterTarget(target: Omit<FrontmatterTargetSnapshot, 'note'>): Promise<string> {
+    if (!this.frontmatterFileIsCurrent(target)) throw new FrontmatterRunConflict();
+    return this.app.vault.read(target.file);
+  }
+
+  // Returns the editor showing the note, if any. Separate editors cannot be updated as one change,
+  // so a second editor on the note stops the run.
+  private currentFrontmatterView(target: Omit<FrontmatterTargetSnapshot, 'note'>,
+    diskText: string): MarkdownView | undefined {
+    if (!this.frontmatterFileIsCurrent(target) ||
+        (diskText !== target.diskText && diskText !== target.editorText)) {
+      throw new FrontmatterRunConflict();
+    }
+    const views = this.getOpenMarkdownViews(target.file);
+    if (views.length > 1) throw new FrontmatterRunConflict('multiple-views');
+    const [view] = views;
+    if (view ? view.editor.getValue() !== target.editorText : diskText !== target.editorText) {
+      throw new FrontmatterRunConflict();
+    }
+    return view;
+  }
+
+  private async captureFrontmatterTarget(file: TFile, view: MarkdownView): Promise<FrontmatterTargetSnapshot> {
+    const path = file.path;
+    const editorText = view.editor.getValue();
+    const fileRevision = this.frontmatterFileRevision.get(file) ?? 0;
+    const diskText = await this.app.vault.read(file);
+    const target = { file, path, editorText, diskText, fileRevision };
+    if (view.file !== file || this.currentFrontmatterView(target, diskText) !== view) {
+      throw new FrontmatterRunConflict();
+    }
+    return { ...target, note: parseNote(editorText) };
+  }
+
+  // Compares every open editor and the file with the original and expected text, without changing either.
+  private async inspectFrontmatterWrite(snapshot: FrontmatterTargetSnapshot,
+    expected: string): Promise<FrontmatterWriteOutcome> {
+    const states = this.getOpenMarkdownViews(snapshot.file).map((view) => {
+      const text = view.editor.getValue();
+      return text === expected ? 'expected' : text === snapshot.editorText ? 'original' : 'other';
+    });
+    try {
+      if (!this.frontmatterFileIsCurrent(snapshot)) return 'unknown';
+      const diskText = await this.app.vault.read(snapshot.file);
+      states.push(diskText === expected ? 'expected'
+        : diskText === snapshot.editorText || diskText === snapshot.diskText ? 'original' : 'other');
+    } catch {
+      return 'unknown';
+    }
+    if (states.includes('other')) return 'unknown';
+    if (states.every((state) => state === 'expected')) return 'expected';
+    return states.every((state) => state === 'original') ? 'unchanged' : 'partial';
+  }
+
+  private async requestFrontmatterConsent(snapshot: FrontmatterTargetSnapshot,
+    selection: LlmSelectionSnapshot): Promise<boolean> {
+    return new Promise((resolve) => {
+      let settled = false;
+      const settle = (consented: boolean) => {
+        if (settled) return;
+        settled = true;
+        modal.close();
+        resolve(consented);
+      };
+      const modal = new class extends Modal {
+        onOpen(): void {
+          this.setTitle('Generate search frontmatter');
+          this.contentEl.empty();
+          const account = selection.accountLabel ? ` for account “${selection.accountLabel}”` : '';
+          this.contentEl.createEl('p', { text:
+            `Send only the body of “${snapshot.file.basename}” to ${selection.destination} with model “${selection.modelId}”${account}? ` +
+            'Prism will automatically update prism_summary, prism_keywords and prism_aliases.' });
+          const actions = this.contentEl.createDiv();
+          actions.createEl('button', { text: 'Send' }).addEventListener('click', () => settle(true));
+          actions.createEl('button', { text: 'Cancel' }).addEventListener('click', () => settle(false));
+        }
+        onClose(): void { if (!settled) { settled = true; resolve(false); } }
+      }(this.app);
+      modal.open();
+    });
+  }
+
+  private async writeSearchFrontmatter(snapshot: FrontmatterTargetSnapshot, selection: LlmSelectionSnapshot,
+    metadata: SearchFrontmatter): Promise<void> {
+    const update = snapshot.note.update(metadata);
+    const diskText = await this.readFrontmatterTarget(snapshot);
+    // No await from this final check until the editor transaction or the Vault.process call.
+    const view = this.currentFrontmatterView(snapshot, diskText);
+    if (!this.llmSelectionIsCurrent(selection)) throw new FrontmatterRunConflict();
+    if (view) {
+      try {
+        view.editor.transaction({ changes: [{ from: view.editor.offsetToPos(update.from),
+          to: view.editor.offsetToPos(update.to), text: update.text }] });
+        if (view.editor.getValue() === update.content) await view.save();
+      } catch {
+        throw new FrontmatterWriteError(await this.inspectFrontmatterWrite(snapshot, update.content));
+      }
+    } else {
+      let returned = false;
+      try {
+        await this.app.vault.process(snapshot.file, (currentText) => {
+          // process() covers only the file; an editor opened since the last check could later save over it.
+          if (currentText !== snapshot.editorText || !this.frontmatterFileIsCurrent(snapshot) ||
+              !this.llmSelectionIsCurrent(selection) || this.getOpenMarkdownViews(snapshot.file).length > 0) {
+            throw new FrontmatterRunConflict();
+          }
+          returned = true;
+          return update.content;
+        });
+      } catch (error) {
+        if (!returned && error instanceof FrontmatterRunConflict) throw error;
+        throw new FrontmatterWriteError(await this.inspectFrontmatterWrite(snapshot, update.content));
+      }
+    }
+    const outcome = await this.inspectFrontmatterWrite(snapshot, update.content);
+    if (outcome !== 'expected') throw new FrontmatterWriteError(outcome);
+  }
+
+  private frontmatterWriteNotice(error: unknown, name: string): string {
+    if (error instanceof FrontmatterRunConflict) {
+      return error.reason === 'multiple-views'
+        ? 'This note was opened in another tab, so nothing was written. Close the other tabs and retry.'
+        : 'The note or LLM settings changed, so nothing was written. Retry.';
+    }
+    if (error instanceof FrontmatterError) return 'Prism cannot safely update this note frontmatter, so nothing was written.';
+    return {
+      unchanged: 'Prism could not write search frontmatter; the note still has its previous content. Retry.',
+      expected: `Search frontmatter was written to “${name}”, but Obsidian reported an error. Check the note.`,
+      partial: `Search frontmatter for “${name}” was only partly applied: the editor and the file differ. ` +
+        'Check the note before retrying.',
+      unknown: `Prism could not confirm the content of “${name}” after an error. Check the note before retrying.`,
+    }[error instanceof FrontmatterWriteError ? error.outcome : 'unknown'];
+  }
+
+  private async generateFrontmatterFromActiveNote(): Promise<void> {
+    const active = this.app.workspace.getActiveFile() as TAbstractFile | null;
+    if (!active) {
+      new Notice('Open a Markdown note to generate search frontmatter.');
+      return;
+    }
+    if (!(active instanceof TFile) || active.extension !== 'md') {
+      new Notice('Search frontmatter can be generated only for Markdown notes.');
+      return;
+    }
+    const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+    if (!view || view.file !== active) {
+      new Notice('Search frontmatter can be generated only for Markdown notes.');
+      return;
+    }
+    if (this.activeFrontmatterRuns.has(active)) {
+      new Notice('Search frontmatter is already being generated for this note.');
+      return;
+    }
+
+    const notSent = (error: unknown) => new Notice(
+      error instanceof FrontmatterRunConflict && error.reason === 'multiple-views'
+        ? 'This note is open in more than one tab. Close the other tabs and retry; nothing was sent.'
+        : 'The note or LLM settings changed, so nothing was sent. Retry.');
+    this.activeFrontmatterRuns.add(active);
+    try {
+      let snapshot: FrontmatterTargetSnapshot;
+      try { snapshot = await this.captureFrontmatterTarget(active, view); }
+      catch (error) {
+        if (error instanceof FrontmatterError) {
+          new Notice(error.reason === 'invalid_yaml'
+            ? 'The note frontmatter is not valid YAML, so nothing was sent. Fix it and retry.'
+            : 'Prism cannot safely update this note frontmatter, so nothing was sent.');
+        } else {
+          notSent(error);
+        }
+        return;
+      }
+      try { checkSearchFrontmatterBody(snapshot.note.body); }
+      catch (error) {
+        new Notice(error instanceof Error && error.message.includes('12,000')
+          ? 'The note body exceeds 12,000 UTF-8 bytes, so nothing was sent. Shorten it and retry.'
+          : 'The note body is empty, so nothing was sent.');
+        return;
+      }
+
+      let selection: LlmSelectionSnapshot;
+      try { selection = this.captureLlmSelection(); }
+      catch {
+        new Notice('Set up the selected LLM connection in Prism settings; nothing was sent.');
+        return;
+      }
+      const consented = await this.requestFrontmatterConsent(snapshot, selection);
+      if (!consented) {
+        new Notice('Search frontmatter cancelled; nothing was sent.');
+        return;
+      }
+      try {
+        this.currentFrontmatterView(snapshot, await this.readFrontmatterTarget(snapshot));
+        if (!this.llmSelectionIsCurrent(selection)) throw new FrontmatterRunConflict();
+      } catch (error) {
+        notSent(error);
+        return;
+      }
+
+      let metadata: SearchFrontmatter;
+      try {
+        metadata = await generateSearchFrontmatter({
+          generate: (request) => this.generateWithLlmSelection(selection, request),
+        }, snapshot.note.body);
+      } catch {
+        new Notice('Search frontmatter generation failed. The note was not changed; check the selected connection and retry.');
+        return;
+      }
+
+      try { await this.writeSearchFrontmatter(snapshot, selection, metadata); }
+      catch (error) {
+        new Notice(this.frontmatterWriteNotice(error, snapshot.file.basename));
+        return;
+      }
+      new Notice(`Search frontmatter updated in “${snapshot.file.basename}”.`);
+    } finally {
+      this.activeFrontmatterRuns.delete(active);
+    }
   }
 
   async answerQuery(query: string, history: readonly ConversationExchange[] = []): Promise<CitedAnswer> {
@@ -651,6 +982,7 @@ export default class PrismPlugin extends Plugin {
 
   async setLlmModel(value: string): Promise<void> {
     const llmModel = value.trim();
+    if (llmModel !== this.settings.llmModel) this.llmSelectionGeneration++;
     await this.savePluginData({ llmModel });
     this.settings = { ...this.settings, llmModel };
   }
@@ -658,13 +990,16 @@ export default class PrismPlugin extends Plugin {
   async setLlmConnection(value: PluginSettings['llmConnection']): Promise<void> {
     if (!['api-key', 'chatgpt-codex', 'github-copilot'].includes(value)) throw new Error('Unknown LLM connection.');
     if (value === 'github-copilot' && !Platform.isDesktopApp) throw new LLMProviderError('unavailable');
+    const changed = this.settings.llmConnection !== value;
+    if (changed) this.llmSelectionGeneration++;
     await this.savePluginData({ llmConnection: value });
-    if (this.settings.llmConnection !== value) this.invalidateCopilotOperations();
+    if (changed) this.invalidateCopilotOperations();
     this.settings = { ...this.settings, llmConnection: value };
   }
 
   async setCodexModel(value: string): Promise<void> {
     const codexModel = value.trim();
+    if (codexModel !== this.settings.codexModel) this.llmSelectionGeneration++;
     await this.savePluginData({ codexModel });
     this.settings = { ...this.settings, codexModel };
   }
@@ -672,6 +1007,7 @@ export default class PrismPlugin extends Plugin {
   async setCopilotModel(value: string): Promise<void> {
     const copilotModel = value.trim();
     if (copilotModel === this.settings.copilotModel) return;
+    this.llmSelectionGeneration++;
     await this.savePluginData({ copilotModel });
     this.settings = { ...this.settings, copilotModel };
     this.invalidateCopilotOperations(false);
@@ -679,6 +1015,7 @@ export default class PrismPlugin extends Plugin {
   }
 
   setLlmApiKey(value: string): void {
+    if (this.app.secretStorage.getSecret('prism-llm-api-key') !== value.trim()) this.llmSelectionGeneration++;
     this.app.secretStorage.setSecret('prism-llm-api-key', value.trim());
   }
 
@@ -854,6 +1191,8 @@ class PrismSettingTab extends PluginSettingTab {
     } else {
       this.addIconNotice(containerEl, 'shield',
         `Answers send questions, history and retrieved note text to ${destination}.`);
+      this.addIconNotice(containerEl, 'shield',
+        `Search frontmatter sends only the active note body to ${destination} after you confirm.`);
     }
 
     this.createSetting(containerEl, 'Search method', 'search',
