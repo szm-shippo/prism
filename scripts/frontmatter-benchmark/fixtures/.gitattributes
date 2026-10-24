@@ -1,0 +1,2 @@
+# Fixture bytes are hash-verified; keep Git from rewriting line endings.
+* -text
