@@ -1,0 +1,37 @@
+{
+  "description": "Recovered #96 pre-run synthetic fixture (24 notes, 48 questions). Bytes are unchanged from the recovery.",
+  "provenance": {
+    "recoveryRecord": "issue-99-recovered-original/provenance.json (scratch, outside the repository)",
+    "recoveryRecordSha256": "21b2a504c2ddf426aa0317ab8b2bc98f7326b3a41c7ae153d75279f1a94da59e",
+    "historicalHarnessSha256": "f64baf4d885662640475e920e2f680b00757eb548380206add22dc8c4d3d91f3",
+    "historicalCombinedLoaderSha256": "04ff9922a0e467721d8cdd81363688d7da396c5af205d9d8fe71807b167c24d1",
+    "combinedLoaderFormula": "SHA-256 over each note in sorted corpus-relative path order as `path\\0content\\0` (content read as UTF-8 with CRLF replaced by LF), then JSON.stringify({ questions, updateScenarios }). It certifies notes, questions and update scenarios together, not gold separately."
+  },
+  "files": {
+    "corpus/dev/code-review-guideline.md": "8a45b1187990f2be9994fe04c0a504659c9127c9585e3908e343f51bed691a52",
+    "corpus/dev/kestrel-api-auth.md": "35673bae5e2e38133a53a58e296447001907e56bd0245f8ffdce900d2822df57",
+    "corpus/dev/release-calendar.md": "83c5e2e811465090daf5a95b4ed0413c659a8f44bd0a9acdfd573083d8120fe7",
+    "corpus/facility/meeting-room-booking.md": "47bcf74ad1769f5f720e979297eff36365c57f7b085f45563098152872c8522c",
+    "corpus/facility/office-moving.md": "b45840305cc10a667c3018490e13e63f6a8a34282ecef407842d6eacbe6883e5",
+    "corpus/hr/onboarding-checklist.md": "41690ac3f9d6b39491a306fa8caadde2a36c4c7358fe9c43155e858fc693846b",
+    "corpus/hr/remote-work-allowance.md": "ece44b5753c1674ba13c4aef8db2df651d748c4293b6518d9aa00bf23118169e",
+    "corpus/incidents/2026-04-delivery-api-outage.md": "ddc640ecdbc093353489b08c9d675385ff49a17b9ce371815ceab40c67e24553",
+    "corpus/incidents/2026-05-delivery-api-latency.md": "45db6146abaa15843a7ef806e2d6b35955266589284ac9494f884c6b1e89977f",
+    "corpus/incidents/2026-06-warehouse-terminal.md": "caec4cef67df1e11ab66e409ca4717f80a46b633b3582daea6f8f24ce08f5ae1",
+    "corpus/it/password-policy.md": "e321cb2bf3d74c4117cd861f576b8a6d8b0a82b82cd0e3f74bbb10472e5aa8ba",
+    "corpus/it/vpn-client-setup.md": "0ce14219cc8a885d0ae9b6d2d26884abc91148c637283b2832324282074bbb10",
+    "corpus/notes/coffee-machine.md": "23fbde40fd20422da06f2ef8a30ec1aee938e1e0d50621e4db428f6625bd158c",
+    "corpus/notes/customer-support-escalation.md": "a0704cd2fd23ca8c70e19a151ef7eb477765d72de16dfe7b1b878c618e71b3da",
+    "corpus/notes/fire-drill.md": "7256bc1529832032e1b659b796478d0cefb3628f07e6869c84d53be6feb4489a",
+    "corpus/notes/printer-guide.md": "3b18ad95a4d306f3ce0f4a202cefb845543bdbe7f55e946d4c35eefd905713e7",
+    "corpus/notes/server-room-access.md": "c3ed51302ee3d91ee4a2b297300b52abe569c0dbdfb3147662c992dc864f4377",
+    "corpus/notes/travel-expense.md": "b3d3bb53b85a3c534589ed87f2a1de8bc185d40b3fc9dd8e997e771945cf3644",
+    "corpus/ops/backup-accounting.md": "544db98de03367ca35261ae45a89cd56bc4c6e6a790fe3df3ae7d250a6e600de",
+    "corpus/ops/backup-hr.md": "0028b454c31de119345b6ccd78f5fe1f864974fa01398ff0973f1de17f9d1834",
+    "corpus/ops/backup-inventory.md": "5cd9f3b12981a3e1a32e82e72c5607442dfdc3a3c31e5c18256b093a0d9f777f",
+    "corpus/ops/nightly-batch-rerun.md": "a1d0e47404ee70b14a5fc90b198abb8730bf566955e6e790357d369625969f02",
+    "corpus/sales/heron-campaign.md": "42f8004b3dd2959ce562bc82b038454a2572c950be26609be0fe4ce255b4865a",
+    "corpus/sales/quarterly-target.md": "0704322348b4fd56e23dac28715b731ea23dad3132a764c6bbed6fdb84e26f78",
+    "questions.json": "921cfeb2758a155e756dc023fca4f65d48c25e342c49b3f2897a207de6d70d42"
+  }
+}

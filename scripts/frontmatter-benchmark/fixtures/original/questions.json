@@ -1,0 +1,72 @@
+{
+  "groups": {
+    "attribute": "The question uses a title, alias or tag that appears only in frontmatter.",
+    "body": "The question uses body wording only; the note has frontmatter.",
+    "similar": "Several notes share near-identical titles, aliases and tags; the answer is in one of them.",
+    "plain": "The note has no frontmatter."
+  },
+  "questions": [
+    { "id": "attribute-01", "group": "attribute", "question": "ナイトリー再投入はどのコマンドで行う？", "path": "ops/nightly-batch-rerun.md", "section": "## 再実行コマンド" },
+    { "id": "attribute-02", "group": "attribute", "question": "NBR手順で最初に確認することは？", "path": "ops/nightly-batch-rerun.md", "section": "## 事前確認" },
+    { "id": "attribute-03", "group": "attribute", "question": "ケストレル認証のトークンを失効させるには？", "path": "dev/kestrel-api-auth.md", "section": "## 失効の手順" },
+    { "id": "attribute-04", "group": "attribute", "question": "Kestrel API のトークンはどうやって発行する？", "path": "dev/kestrel-api-auth.md", "section": "## トークンの発行" },
+    { "id": "attribute-05", "group": "attribute", "question": "Room Booking Policy ではどれくらい先まで予約できる？", "path": "facility/meeting-room-booking.md", "section": "## 予約できる期間" },
+    { "id": "attribute-06", "group": "attribute", "question": "部屋押さえを取り消す期限は？", "path": "facility/meeting-room-booking.md", "section": "## キャンセル" },
+    { "id": "attribute-07", "group": "attribute", "question": "WFH allowance の金額はいくら？", "path": "hr/remote-work-allowance.md", "section": "## 金額" },
+    { "id": "attribute-08", "group": "attribute", "question": "テレワーク補助の対象になる条件は？", "path": "hr/remote-work-allowance.md", "section": "## 支給条件" },
+    { "id": "attribute-09", "group": "attribute", "question": "ヘロン施策で配る特典は？", "path": "sales/heron-campaign.md", "section": "## 配布する特典" },
+    { "id": "attribute-10", "group": "attribute", "question": "Project Heron の効果はどう測る？", "path": "sales/heron-campaign.md", "section": "## 効果測定" },
+    { "id": "attribute-11", "group": "attribute", "question": "Lynx VPN の初回接続で入力するサーバー名は？", "path": "it/vpn-client-setup.md", "section": "## 初回の接続" },
+    { "id": "attribute-12", "group": "attribute", "question": "リモート接続ツールがつながらないときはどうする？", "path": "it/vpn-client-setup.md", "section": "## つながらないとき" },
+
+    { "id": "body-01", "group": "body", "question": "1回の変更は何行以内が目安？", "path": "dev/code-review-guideline.md", "section": "## 変更の大きさ" },
+    { "id": "body-02", "group": "body", "question": "取り込むには何人の承認が必要？", "path": "dev/code-review-guideline.md", "section": "## 承認の条件" },
+    { "id": "body-03", "group": "body", "question": "引っ越しの荷物は段ボール何箱まで？", "path": "facility/office-moving.md", "section": "## 各自の準備" },
+    { "id": "body-04", "group": "body", "question": "新しいビルにはどうやって入館する？", "path": "facility/office-moving.md", "section": "## 新しい入館方法" },
+    { "id": "body-05", "group": "body", "question": "新規顧客での売上目標はいくら？", "path": "sales/quarterly-target.md", "section": "## 売上目標" },
+    { "id": "body-06", "group": "body", "question": "訪問記録の入力率は個人評価でどれくらいの重み？", "path": "sales/quarterly-target.md", "section": "## 評価方法" },
+    { "id": "body-07", "group": "body", "question": "パスワードは何文字以上にする？", "path": "it/password-policy.md", "section": "## 長さと文字種" },
+    { "id": "body-08", "group": "body", "question": "検証用の共有端末で使える使い捨てパスワードの有効時間は？", "path": "it/password-policy.md", "section": "## 使い回しの禁止と例外" },
+    { "id": "body-09", "group": "body", "question": "入社初日の午後には何をする？", "path": "hr/onboarding-checklist.md", "section": "## 初日" },
+    { "id": "body-10", "group": "body", "question": "相談役との振り返りは毎日何分？", "path": "hr/onboarding-checklist.md", "section": "## 最初の週" },
+    { "id": "body-11", "group": "body", "question": "本番への反映は何曜日に行う？", "path": "dev/release-calendar.md", "section": "## 通常のリリース" },
+    { "id": "body-12", "group": "body", "question": "年末に反映を止める期間はいつからいつまで？", "path": "dev/release-calendar.md", "section": "## 凍結期間" },
+
+    { "id": "similar-01", "group": "similar", "question": "人事システムのバックアップはどのくらいの期間保存する？", "path": "ops/backup-hr.md", "section": "## 保存期間" },
+    { "id": "similar-02", "group": "similar", "question": "会計システムのバックアップはいつ取得する？", "path": "ops/backup-accounting.md", "section": "## 取得タイミング" },
+    { "id": "similar-03", "group": "similar", "question": "在庫バックアップの復元手順は？", "path": "ops/backup-inventory.md", "section": "## 復元手順" },
+    { "id": "similar-04", "group": "similar", "question": "会計バックアップの保存期間は？", "path": "ops/backup-accounting.md", "section": "## 保存期間" },
+    { "id": "similar-05", "group": "similar", "question": "人事バックアップから復元するときの手順は？", "path": "ops/backup-hr.md", "section": "## 復元手順" },
+    { "id": "similar-06", "group": "similar", "question": "在庫システムのバックアップを取る時刻は？", "path": "ops/backup-inventory.md", "section": "## 取得タイミング" },
+    { "id": "similar-07", "group": "similar", "question": "4月の配送停止の原因は？", "path": "incidents/2026-04-delivery-api-outage.md", "section": "## 原因" },
+    { "id": "similar-08", "group": "similar", "question": "5月の配送遅延の再発防止策は？", "path": "incidents/2026-05-delivery-api-latency.md", "section": "## 再発防止" },
+    { "id": "similar-09", "group": "similar", "question": "倉庫端末が止まった障害の影響範囲は？", "path": "incidents/2026-06-warehouse-terminal.md", "section": "## 影響" },
+    { "id": "similar-10", "group": "similar", "question": "配送 API 遅延の原因は何だった？", "path": "incidents/2026-05-delivery-api-latency.md", "section": "## 原因" },
+    { "id": "similar-11", "group": "similar", "question": "配送 API 停止の再発防止として何をした？", "path": "incidents/2026-04-delivery-api-outage.md", "section": "## 再発防止" },
+    { "id": "similar-12", "group": "similar", "question": "6月の端末停止の原因は？", "path": "incidents/2026-06-warehouse-terminal.md", "section": "## 原因" },
+
+    { "id": "plain-01", "group": "plain", "question": "コーヒー豆が切れていたらどこに連絡する？", "path": "notes/coffee-machine.md", "section": "## 豆の補充" },
+    { "id": "plain-02", "group": "plain", "question": "洗浄モードはいつ動かす？", "path": "notes/coffee-machine.md", "section": "## 掃除" },
+    { "id": "plain-03", "group": "plain", "question": "大阪の宿泊費の上限は？", "path": "notes/travel-expense.md", "section": "## 宿泊費" },
+    { "id": "plain-04", "group": "plain", "question": "出張費の精算はいつまでに申請する？", "path": "notes/travel-expense.md", "section": "## 精算の期限" },
+    { "id": "plain-05", "group": "plain", "question": "サーバー室に飲み物は持ち込める？", "path": "notes/server-room-access.md", "section": "## 入室中のルール" },
+    { "id": "plain-06", "group": "plain", "question": "サーバー室の入室申請はいつまでに出す？", "path": "notes/server-room-access.md", "section": "## 入室の申請" },
+    { "id": "plain-07", "group": "plain", "question": "返金がいくらを超えたら二次対応に回す？", "path": "notes/customer-support-escalation.md", "section": "## 引き継ぎの基準" },
+    { "id": "plain-08", "group": "plain", "question": "問い合わせへの最初の返信は何分以内？", "path": "notes/customer-support-escalation.md", "section": "## 一次対応" },
+    { "id": "plain-09", "group": "plain", "question": "避難訓練の集合場所はどこ？", "path": "notes/fire-drill.md", "section": "## 集合場所" },
+    { "id": "plain-10", "group": "plain", "question": "点呼の結果は何分以内に報告する？", "path": "notes/fire-drill.md", "section": "## 点呼" },
+    { "id": "plain-11", "group": "plain", "question": "スキャンした文書はどこに届く？", "path": "notes/printer-guide.md", "section": "## スキャン" },
+    { "id": "plain-12", "group": "plain", "question": "トナーの交換は誰に頼む？", "path": "notes/printer-guide.md", "section": "## 用紙切れ" }
+  ],
+  "updateScenarios": {
+    "notes": ["ops/nightly-batch-rerun.md", "dev/kestrel-api-auth.md", "hr/remote-work-allowance.md", "it/vpn-client-setup.md"],
+    "excludedLines": ["reviewed: 2026-10-19", "reviewed_by: ops-bot"],
+    "addedTag": "要確認",
+    "bodyEdits": {
+      "ops/nightly-batch-rerun.md": ["個別に起動しない。", "個別に起動しない。終了後は jobctl status で確認する。"],
+      "dev/kestrel-api-auth.md": ["超過すると 429 を返す。", "超過すると 429 を返し、1 分後に再開できる。"],
+      "hr/remote-work-allowance.md": ["試用期間中は対象外。", "試用期間中も対象とする。"],
+      "it/vpn-client-setup.md": ["管理者権限は不要。", "管理者権限は不要で、再起動も求められない。"]
+    }
+  }
+}
